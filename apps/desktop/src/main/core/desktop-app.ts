@@ -1,5 +1,6 @@
 import { appEvents } from '@desktop-frame/contracts';
 import type { ServiceContainer } from './container';
+import type { DeploymentManagerImpl } from './deployment/manager';
 import type { AppEnv } from './ports/env';
 import type { HostApp } from './ports/host';
 import type { EventPublisher } from './ports/event-publisher';
@@ -30,6 +31,8 @@ export interface DesktopAppParts {
     readonly events: EventPublisher;
     /** IPC 传输适配（electron ipcMain）。 */
     readonly transport: IpcTransport;
+    /** 外部部署控制面（实现类型：框架独占 register/startAll/stopAll）。 */
+    readonly deployments: DeploymentManagerImpl;
     /** 待装配的业务模块。 */
     readonly modules: ReadonlyArray<AppModule>;
     /** 主窗口的 definition id（无窗口定义时为 undefined）。 */
@@ -47,7 +50,7 @@ const DEV_SERVER_POLL_MS = 250;
  * lifespan 驱动：业务代码只声明（模块 init / dispose / onShutdown），
  * 时序由本对象驱动。
  *
- *   run():  whenReady -> 注册模块 -> 模块 init -> 路由上线
+ *   run():  whenReady -> 注册模块 -> 拉起外部部署 -> 模块 init -> 路由上线
  *           -> lifecycle "ready" -> 打开主窗口 -> 挂起直到 "exited"
  *   quit(): host.quit() -> before-quit -> shutdown joiner 管线 -> host.exit(0)
  */
@@ -68,6 +71,8 @@ export class DesktopApp {
     readonly windows: WindowHost;
     /** 事件发布器。 */
     readonly events: EventPublisher;
+    /** 外部部署控制面（readonly 暴露供测试断言部署状态）。 */
+    readonly deployments: DeploymentManagerImpl;
 
     private readonly transport: IpcTransport;
     private readonly modules: ReadonlyArray<AppModule>;
@@ -87,6 +92,7 @@ export class DesktopApp {
         this.router = parts.router;
         this.windows = parts.windows;
         this.events = parts.events;
+        this.deployments = parts.deployments;
         this.transport = parts.transport;
         this.modules = parts.modules;
         this.primaryWindowId = parts.primaryWindowId;
@@ -107,12 +113,20 @@ export class DesktopApp {
 
         await this.host.whenReady();
 
-        // 装配模块：注册服务 -> 注册路由 -> 模块 init（框架调用业务的起点）。
+        // 装配模块：注册服务 -> 注册外部部署 -> 模块 init（框架调用业务的起点）。
         for (const module of this.modules) {
             for (const registration of module.services ?? []) {
                 this.container.register(registration);
             }
         }
+        // 外部部署先于模块 init 拉起（managed 等待就绪或 failed；external
+        // 挂探测即返回），适配层服务因此可以假定控制面已开始运转。
+        for (const module of this.modules) {
+            for (const spec of module.deployments ?? []) {
+                this.deployments.register(spec);
+            }
+        }
+        await this.deployments.startAll();
         for (const module of this.modules) {
             module.registerRoutes?.(this.router);
         }
@@ -181,10 +195,18 @@ export class DesktopApp {
             });
         });
 
-        // joiner 顺序有意义：窗口先销毁、服务后 dispose，
-        // 使窗口关停期间的逻辑仍能使用服务。
+        // 部署状态迁移同样广播（web 界面的控制面面板）。
+        this.deployments.onChange((change) => {
+            this.events.publish(appEvents.deploymentChanged, {
+                deployment: change.status,
+            });
+        });
+
+        // joiner 顺序有意义：窗口先销毁、服务后 dispose、外部进程最后终止
+        // （窗口关停与服务 dispose 期间仍可使用外部服务）。
         this.lifecycle.onShutdown(() => this.windows.closeAll());
         this.lifecycle.onShutdown(() => this.container.dispose());
+        this.lifecycle.onShutdown(() => this.deployments.stopAll());
     }
 
     /** 优雅关停：执行 shutdown joiner 管线后以 host.exit(0) 收尾。 */

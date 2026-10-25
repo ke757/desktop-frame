@@ -15,18 +15,19 @@
 - `pnpm test` / `pnpm typecheck` / `pnpm lint` / `pnpm lint:fix`：全包执行，提交前应全绿。
 - `pnpm --filter @desktop-frame/desktop package`：forge 打包（自动先构建 web，产物在 `apps/desktop/out/`）。
 - 首次打包若 electron 缓存下载失败：加 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`。
+- dev 下外部服务是 external 模式（等手动启动）：`node apps/desktop/test/fixtures/echo-service.mjs`（演示 fixture，默认 7801 端口）。
 
 ## 代码结构规则
 
 - 主进程代码在 `src/main/`（六边形架构，端口与适配器镜像）：
-  - `main/core/ports/**`：**端口层**——core 拥有的接缝接口（`HostApp`、`WindowHost`、`IpcTransport`、`EventPublisher`、`Logger`、`AppModule`、DI 词汇、`AppEnv` 等）；ports 只依赖 ports。
-  - `main/electron/**`：**适配层**——每个文件对应一个端口的 electron 实现（host/ipc-transport/logging/windows-manager）；对 core 的 import 只允许 `core/ports/**`。
-  - `main/core/**`（ports 之外）：框架实现（container/lifecycle/router/builder/desktop-app/events 等），零 electron import，相对 import 不逃出 core。
+  - `main/core/ports/**`：**端口层**——core 拥有的接缝接口（`HostApp`、`WindowHost`、`IpcTransport`、`EventPublisher`、`Logger`、`AppModule`、DI 词汇、`AppEnv`、`ProcessHost`、`DeploymentManager`/`DeploymentSpec` 等）；ports 只依赖 ports。
+  - `main/electron/**`：**适配层**——每个文件对应一个端口的实现（host/ipc-transport/logging/windows-manager/process-host）；OS 级适配（node:child_process）也住这里；对 core 的 import 只允许 `core/ports/**`。
+  - `main/core/**`（ports 之外）：框架实现（container/lifecycle/router/builder/desktop-app/events/deployment 等），零 electron import，相对 import 不逃出 core。
   - `main/index.ts`：装配脚本；`main/windows.ts`：窗口定义（应用声明）。
   - 业务模块里只允许 `dialog`/`BrowserWindow` 的 electron 直接使用，且对 core 的 import 只走 barrel `'../../core'`。
 - 启动分层（对齐 Tauri `Builder → build → run` / FastAPI lifespan 反转）：
   - `src/main.ts`：进程壳，只承载进程级策略（squirrel、单实例锁、全局异常、fatal 退出码）。
-  - `main/index.ts`：装配脚本，只声明"应用由什么组成"（`.use()` 模块、`.window()` 窗口、注入 electron 适配）。
+  - `main/index.ts`：装配脚本，只声明"应用由什么组成"（`.use()` 模块、`.window()` 窗口、`processHost`/`deploymentProfile` 注入）。
   - `core/builder.ts`：`desktopApp()` DSL + 框架接线（`build()` 内的核心对象互连是全仓库唯一接线点，只在框架演进时改动，业务变化不碰它）。
   - `core/desktop-app.ts`：`DesktopApp` 总对象，拥有从启动到退出的完整生命周期；`run()` 在 lifecycle 到 `exited` 后 resolve。注意所有权方向是 `app → container` 单向：**DesktopApp 本身不注册进容器**（组合根不是自己的服务节点），业务需要退出等应用级能力时走 `hostToken`。
 - 入口只有两个：`src/main.ts`、`src/preload.ts`（forge 按文件名产出 main.cjs/preload.cjs，勿改名/移入子目录）。
@@ -36,8 +37,13 @@
 - 服务定义用 `defineService(token, factory)`；factory 内需要依赖用 `accessor.get(token)`，避免并行 get 重叠子图（循环检测会误报）。
 - **接口化 token（公开面与框架钩子分离）**：暴露给模块外部的服务必须 `interface XxxService`（token 的类型参数，只列外部可调方法）+ `class XxxServiceImpl implements XxxService, DisposableService`（生命周期方法如 load/flush 在实现上）。`dispose()` 刻意不进公开接口——它是框架钩子，只由容器调用。私有协作者直接 `new` 在 factory 内，不给 token。
 - **模块目录即封装边界**：跨模块 import 只允许指向对方模块的 `*.service.ts` / `*.module.ts` / `*.tokens.ts`（拿接口与 token）；跨模块协作只走契约与 token 两条通道。
+- **外部服务接入（控制平面/数据平面，详见 ARCHITECTURE.md §8）**：
+  - 部署声明是模块变量（`DeploymentSpec`），经 `AppModule.deployments` 申报；框架在模块 init 前 `startAll()`（managed 等待健康就绪，external 只挂探测）。
+  - dev 覆盖走 `desktopApp({ deploymentProfile })`，仅 `env.isDev` 生效（典型：切 external 等手动启动）；打包产物恒用原始 spec。
+  - 内部服务依赖外部领域服务时写**适配层服务**（范例 `modules/search`）：`createExternalServiceClient`（等就绪 + HTTP/WS），HTTP 失败翻译 RpcError、WS 推送桥接内部事件；不要在业务代码里直连外部 URL。
+  - 业务不要直接 spawn 进程——一律经 `ProcessHost` 端口/`DeploymentManager`。
 - 分层/边界由 `test/architecture.test.ts` 静态扫描固化（core 零 electron、core 不逃逸、ports 只依赖 ports、modules 只走 barrel、跨模块 import 白名单、electron 只 import ports）；改 `src/main` 结构前先跑它，红了是破坏约定而不是测试问题。
-- 有资源的服务的清理写在 `dispose()`，由容器逆序调用；进程级清理（如服务落盘之外的）注册为 `lifecycle.onShutdown(joiner)`，注意 joiner 顺序（窗口先、服务后）。
+- 有资源的服务的清理写在 `dispose()`，由容器逆序调用；进程级清理（如服务落盘之外的）注册为 `lifecycle.onShutdown(joiner)`，注意 joiner 顺序（窗口先、服务后、外部进程最后）。
 
 ## 风格
 
@@ -58,3 +64,4 @@
 - 新端口（core 需要新的外部能力接缝时）→ `main/core/ports/<name>.ts` + 对应适配器 `main/electron/<name>.ts`；端口必须先于适配器存在（依赖倒置）
 - 新核心服务/框架接线调整 → `core/builder.ts`（build() 内）+ `core/tokens.ts`；此类改动属于框架演进，必须伴随集成测试
 - 全局清理逻辑 → `core/desktop-app.ts` 的 `wireHostEvents()` 生命周期接线处（shutdown joiner）
+- 新外部领域服务 → `modules/<module>/<module>.deployment.ts`（DeploymentSpec 模块变量）+ `<module>.service.ts` 里用 `createExternalServiceClient` 写适配层实现；dev 覆盖在 `main/index.ts` 的 `deploymentProfile` 里加一条

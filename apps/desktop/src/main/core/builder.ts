@@ -1,8 +1,11 @@
 import { defineService } from './container';
 import { ServiceContainer } from './container';
 import { resolveEnv } from './env';
+import { DeploymentManagerImpl } from './deployment/manager';
+import type { DeploymentProfile } from './ports/deployment';
 import type { AppEnv } from './ports/env';
 import type { HostApp } from './ports/host';
+import type { ProcessHost } from './ports/process-host';
 import { EventPublisherImpl } from './ipc/events';
 import { IpcRouter } from './ipc/router';
 import type { IpcTransport } from './ports/ipc-transport';
@@ -12,6 +15,7 @@ import { createConsoleLogger } from './logging';
 import type { AppModule } from './ports/module';
 import { DesktopApp } from './desktop-app';
 import {
+    deploymentsToken,
     envToken,
     eventsToken,
     hostToken,
@@ -27,6 +31,8 @@ export interface DesktopAppOptions {
     readonly host: HostApp;
     /** IPC 传输适配（app/electron-transport.ts 提供）。 */
     readonly transport: IpcTransport;
+    /** 进程宿主适配（electron/process-host.ts 提供；测试注入 Fake）。 */
+    readonly processHost: ProcessHost;
     /** 主进程 bundle 目录（运行时 `__dirname`），用于解析资源路径。 */
     readonly mainDir: string;
     /** 窗口宿主工厂：由 app 层注入 WindowManager，测试注入 Fake。 */
@@ -36,6 +42,11 @@ export interface DesktopAppOptions {
     }) => WindowHost;
     /** 根 logger 工厂（缺省为控制台实现；app 层应传 electron-log 实现）。 */
     readonly createLogger?: () => Logger;
+    /**
+     * dev 模式的部署覆盖 profile（仅 env.isDev 时由 DeploymentManager
+     * 应用；典型用途：把 managed 覆盖为 external，等待用户手动启动服务）。
+     */
+    readonly deploymentProfile?: DeploymentProfile;
 }
 
 /**
@@ -92,6 +103,12 @@ export class DesktopAppBuilder {
             logger,
             events,
         });
+        const deployments = new DeploymentManagerImpl({
+            processHost: this.options.processHost,
+            env,
+            logger: logger.child('deployments'),
+            profile: this.options.deploymentProfile,
+        });
 
         // ---- 核心对象注册为容器服务（实例注册，业务模块经 token 取用）----
         container.register(defineService(hostToken, () => host));
@@ -100,6 +117,7 @@ export class DesktopAppBuilder {
         container.register(defineService(lifecycleToken, () => lifecycle));
         container.register(defineService(eventsToken, () => events));
         container.register(defineService(windowsToken, () => windows));
+        container.register(defineService(deploymentsToken, () => deployments));
 
         const app = new DesktopApp({
             host,
@@ -111,6 +129,7 @@ export class DesktopAppBuilder {
             windows,
             events,
             transport,
+            deployments,
             modules: [...this.modules],
             primaryWindowId: windows.primaryDefinitionId,
         });

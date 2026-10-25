@@ -1,9 +1,15 @@
 import { z } from 'zod';
 import { event, procedure, voidInput } from './procedure';
 import {
+    DeploymentChangedEventSchema,
+    DeploymentIdSchema,
+    DeploymentStatusSchema,
     LifecycleChangedEventSchema,
     OpenDialogOptionsSchema,
     OpenDialogResultSchema,
+    SearchIndexChangedEventSchema,
+    SearchQuerySchema,
+    SearchResponseSchema,
     SettingsChangedEventSchema,
     SettingsFileSchema,
     SettingsPatchSchema,
@@ -47,6 +53,26 @@ export const contract = {
         /** 应用部分更新并返回更新后的完整设置。 */
         update: procedure('settings.update', SettingsPatchSchema, SettingsFileSchema),
     },
+    /** 外部部署控制面端点。 */
+    deployments: {
+        /** 列出全部部署的当前状态快照。 */
+        list: procedure('deployments.list', voidInput, z.array(DeploymentStatusSchema)),
+        /** 启动指定部署（managed 拉起进程并等待就绪；external 重新挂探测）。 */
+        start: procedure('deployments.start', DeploymentIdSchema, DeploymentStatusSchema),
+        /** 停止指定部署（managed 走优雅终止；external 撤销探测）。 */
+        stop: procedure('deployments.stop', DeploymentIdSchema, DeploymentStatusSchema),
+        /** 重启指定部署（停止后重新启动）。 */
+        restart: procedure(
+            'deployments.restart',
+            DeploymentIdSchema,
+            DeploymentStatusSchema,
+        ),
+    },
+    /** 搜索域服务端点（外部服务的适配层代理）。 */
+    search: {
+        /** 调用外部搜索服务。 */
+        query: procedure('search.query', SearchQuerySchema, SearchResponseSchema),
+    },
 } as const;
 
 /** main→renderer 事件定义。 */
@@ -55,4 +81,8 @@ export const appEvents = {
     lifecycleChanged: event('app.lifecycleChanged', LifecycleChangedEventSchema),
     /** 设置变更广播。 */
     settingsChanged: event('app.settingsChanged', SettingsChangedEventSchema),
+    /** 部署状态迁移广播（控制面）。 */
+    deploymentChanged: event('app.deploymentChanged', DeploymentChangedEventSchema),
+    /** 外部搜索索引更新（WS 推送经适配层转发）。 */
+    searchIndexChanged: event('app.searchIndexChanged', SearchIndexChangedEventSchema),
 } as const;

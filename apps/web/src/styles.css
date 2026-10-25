@@ -65,6 +65,72 @@ header h1 {
     color: #a12828;
 }
 
+/* 外部部署状态徽标（控制面面板）。 */
+.badge[data-state='running'] {
+    color: #137a3f;
+}
+
+.badge[data-state='starting'],
+.badge[data-state='waiting'],
+.badge[data-state='stopping'] {
+    color: #8a6116;
+}
+
+.badge[data-state='failed'],
+.badge[data-state='crashed'] {
+    color: #a12828;
+}
+
+ul.deployment-list {
+    list-style: none;
+    margin: 0 0 8px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+ul.deployment-list li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+}
+
+.deployment-id {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-weight: 600;
+}
+
+.deployment-note {
+    flex: 1;
+    min-width: 200px;
+    opacity: 0.65;
+}
+
+.deployment-restart {
+    font-size: 12px;
+    padding: 3px 10px;
+}
+
+input[type='text'] {
+    font: inherit;
+    flex: 1;
+    min-width: 200px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid light-dark(#cfd4da, #3a4047);
+    background: light-dark(#ffffff, #262a30);
+    color: inherit;
+}
+
+p.note {
+    font-size: 12px;
+    opacity: 0.6;
+    margin: 0;
+}
+
 section.card {
     background: light-dark(#ffffff, #1e2126);
     border: 1px solid light-dark(#e3e6ea, #2b2f35);

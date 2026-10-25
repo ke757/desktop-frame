@@ -13,8 +13,16 @@ import type {
 import type { RpcResult } from '@desktop-frame/contracts';
 import { MemoryLogger } from '../src/main/core/logging';
 import type { WindowDefinition, WindowHost } from '../src/main/core/ports/window-host';
+import {
+    defineService,
+    deploymentsToken,
+    serviceToken,
+    type AppModule,
+} from '../src/main/core';
 import { settingsToken } from '../src/main/modules/settings/settings.service';
 import { settingsModule } from '../src/main/modules/settings/settings.module';
+import { deploymentsModule } from '../src/main/modules/deployments/deployments.module';
+import { FakeProcessHost, startHealthServer } from './fakes';
 
 /** HostApp 假实现：isPackaged=true 走 file 入口（跳过 dev server 等待）。 */
 class FakeHost implements HostApp {
@@ -173,17 +181,19 @@ function makeApp(dir: string) {
     const windows = new FakeWindowHost();
     const transport = new FakeTransport();
     const logger = new MemoryLogger();
+    const processHost = new FakeProcessHost();
     const app = desktopApp({
         host,
         transport,
         mainDir: dir,
         createWindows: () => windows,
         createLogger: () => logger,
+        processHost,
     })
         .use(settingsModule)
         .window({ id: 'main', isPrimary: true, create: () => undefined })
         .build();
-    return { app, host, windows, transport, logger };
+    return { app, host, windows, transport, logger, processHost };
 }
 
 describe('DesktopApp (builder 集成)', () => {
@@ -256,5 +266,88 @@ describe('DesktopApp (builder 集成)', () => {
 
         await app.quit();
         await running;
+    });
+});
+
+describe('DesktopApp (外部部署控制面)', () => {
+    it('部署在模块 init 前拉起；关停时服务 dispose 先于外部进程终止', async () => {
+        const dir = await makeTempDir();
+        const host = new FakeHost(dir);
+        const windows = new FakeWindowHost();
+        const transport = new FakeTransport();
+        const logger = new MemoryLogger();
+        const processHost = new FakeProcessHost();
+        const order: string[] = [];
+        const health = await startHealthServer();
+
+        /** 带可观察 dispose 的演示服务（证明 dispose 先于进程终止）。 */
+        const demoToken = serviceToken<{ ping(): string }>('modules.demo');
+        const demoService = defineService(demoToken, () => ({
+            ping: () => 'pong',
+            dispose: () => {
+                order.push('service-disposed');
+            },
+        }));
+        const demoModule: AppModule = {
+            id: 'demo',
+            deployments: [
+                {
+                    id: 'demo-svc',
+                    command: 'demo-server',
+                    baseUrl: `http://127.0.0.1:${health.port}`,
+                    health: { path: '/health', intervalMs: 30 },
+                },
+            ],
+            services: [demoService],
+            async init(ctx) {
+                await ctx.services.get(demoToken);
+                const manager = await ctx.services.get(deploymentsToken);
+                // 部署先于模块 init 拉起：init 观察到的必须是 running。
+                order.push(`init:${manager.getStatus('demo-svc')?.state}`);
+            },
+        };
+
+        const app = desktopApp({
+            host,
+            transport,
+            mainDir: dir,
+            createWindows: () => windows,
+            createLogger: () => logger,
+            processHost,
+        })
+            .use(deploymentsModule)
+            .use(demoModule)
+            .window({ id: 'main', isPrimary: true, create: () => undefined })
+            .build();
+        app.deployments.onChange((change) => {
+            if (change.status.id === 'demo-svc' && change.to === 'stopping') {
+                order.push('deployment-stopping');
+            }
+        });
+
+        const running = app.run();
+        await app.lifecycle.when('ready');
+        expect(order).toEqual(['init:running']);
+
+        // 控制面 RPC 面可用（deployments.list 走完整路由管线）。
+        const result = await transport.call('deployments.list', undefined);
+        expect(result).toMatchObject({
+            ok: true,
+            data: [expect.objectContaining({ id: 'demo-svc', state: 'running' })],
+        });
+        // 状态迁移广播走 contracts schema 校验（不合法会被 EventPublisher 丢弃）。
+        expect(
+            windows.sent.some((entry) => entry.channel === 'app.deploymentChanged'),
+        ).toBe(true);
+
+        await app.quit();
+        await running;
+        expect(app.deployments.getStatus('demo-svc')?.state).toBe('stopped');
+        // joiner 顺序：服务 dispose 先于外部进程终止。
+        expect(order.indexOf('service-disposed')).toBeLessThan(
+            order.indexOf('deployment-stopping'),
+        );
+        expect(processHost.processes[0]?.killSignals).toEqual(['SIGTERM']);
+        await health.close();
     });
 });

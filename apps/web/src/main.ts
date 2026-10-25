@@ -5,14 +5,17 @@ import {
     createClient,
     getDesktopBridge,
     IpcError,
+    type DeploymentStatus,
     type LifecycleState,
+    type SearchResponse,
     type SettingsFile,
     type SystemInfo,
 } from '@desktop-frame/contracts';
 
 /**
  * 最小演示界面：覆盖全部 IPC 面——invoke（查询、变更、对话框、错误信封）
- * 与类型化事件订阅。刻意不依赖 UI 框架；换成 React/Vue 不需要动契约。
+ * 与类型化事件订阅，外加外部服务控制面（部署状态面板）与搜索适配层示例。
+ * 刻意不依赖 UI 框架；换成 React/Vue 不需要动契约。
  */
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -47,6 +50,19 @@ function renderShell(): void {
           </select>
           <span class="note" id="settings-note"></span>
         </div>
+      </section>
+      <section class="card">
+        <h2>Deployments (external services control plane)</h2>
+        <ul class="deployment-list" id="deployment-list"></ul>
+        <p class="note" id="deployment-note"></p>
+      </section>
+      <section class="card">
+        <h2>Search (external domain service via adapter)</h2>
+        <div class="row">
+          <input id="search-input" type="text" placeholder="query the external search service…" />
+          <button id="btn-search">Search</button>
+        </div>
+        <ul class="log" id="search-hits"></ul>
       </section>
       <section class="card">
         <h2>Events (main → renderer)</h2>
@@ -109,6 +125,100 @@ function renderSettings(settings: SettingsFile): void {
         note.textContent = `launch #${settings.launchCount + 1} · locale ${settings.locale}`;
 }
 
+/** 渲染单个部署行（或按 id 更新已有行）。 */
+function renderDeployment(status: DeploymentStatus): void {
+    const list = document.querySelector<HTMLUListElement>('#deployment-list');
+    if (!list) return;
+    let row = list.querySelector<HTMLLIElement>(`[data-id="${status.id}"]`);
+    if (!row) {
+        row = document.createElement('li');
+        row.dataset.id = status.id;
+        const label = document.createElement('span');
+        label.className = 'deployment-id';
+        const badge = document.createElement('span');
+        badge.className = 'badge deployment-state';
+        const note = document.createElement('span');
+        note.className = 'note deployment-note';
+        const restart = document.createElement('button');
+        restart.className = 'deployment-restart';
+        restart.textContent = 'Restart';
+        restart.addEventListener('click', () => {
+            void restartDeployment(status.id);
+        });
+        row.append(label, badge, note, restart);
+        list.append(row);
+    }
+    const label = row.querySelector<HTMLElement>('.deployment-id');
+    if (label) label.textContent = status.id;
+    const badge = row.querySelector<HTMLElement>('.deployment-state');
+    if (badge) {
+        badge.dataset.state = status.state;
+        badge.textContent = status.state;
+    }
+    const note = row.querySelector<HTMLElement>('.deployment-note');
+    if (note) {
+        const parts = [status.mode, status.baseUrl];
+        if (status.pid !== null) parts.push(`pid ${status.pid}`);
+        if (status.detail) parts.push(status.detail);
+        note.textContent = parts.join(' · ');
+    }
+}
+
+/** 渲染部署面板说明（dev 下提示手动启动 fixture 的方式）。 */
+function setDeploymentNote(text: string): void {
+    const note = document.querySelector<HTMLElement>('#deployment-note');
+    if (note) note.textContent = text;
+}
+
+/** 拉取并渲染全部部署状态。 */
+async function refreshDeployments(
+    client: ReturnType<typeof createClient>,
+): Promise<void> {
+    try {
+        for (const status of await client.invoke(contract.deployments.list)) {
+            renderDeployment(status);
+        }
+    } catch (cause) {
+        const described = describeError(cause) as { message?: string };
+        setDeploymentNote(`failed to list deployments: ${described.message ?? cause}`);
+    }
+}
+
+/** 请求重启一个部署（结果经 deploymentChanged 事件回流界面）。 */
+async function restartDeployment(id: string): Promise<void> {
+    const bridge = getDesktopBridge();
+    if (!bridge) return;
+    const client = createClient(bridge);
+    try {
+        renderDeployment(await client.invoke(contract.deployments.restart, { id }));
+        logEvent(`deployment ${id} restarted`);
+    } catch (cause) {
+        logEvent(
+            `deployment ${id} restart failed: ${JSON.stringify(describeError(cause))}`,
+        );
+    }
+}
+
+/** 渲染搜索命中列表。 */
+function renderSearchResults(result: SearchResponse): void {
+    const target = document.querySelector<HTMLUListElement>('#search-hits');
+    if (!target) return;
+    target.innerHTML = '';
+    if (result.hits.length === 0) {
+        const empty = document.createElement('li');
+        empty.textContent = '(no hits)';
+        target.append(empty);
+        return;
+    }
+    for (const hit of result.hits) {
+        const item = document.createElement('li');
+        const time = document.createElement('time');
+        time.textContent = hit.title;
+        item.append(time, document.createTextNode(`score ${hit.score.toFixed(2)}`));
+        target.append(item);
+    }
+}
+
 /** 应用入口：检测桥、订阅事件、发起初始调用并绑定按钮。 */
 async function main(): Promise<void> {
     renderShell();
@@ -131,6 +241,41 @@ async function main(): Promise<void> {
     client.on(appEvents.settingsChanged, ({ settings }) => {
         logEvent(`settings changed → ${JSON.stringify(settings)}`);
         renderSettings(settings);
+    });
+    client.on(appEvents.deploymentChanged, ({ deployment }) => {
+        renderDeployment(deployment);
+        logEvent(`deployment ${deployment.id} → ${deployment.state}`);
+    });
+    client.on(appEvents.searchIndexChanged, ({ at }) => {
+        logEvent(`search index updated (${new Date(at).toLocaleTimeString()})`);
+    });
+
+    // 控制面面板：初始快照 + 事件增量更新。
+    await refreshDeployments(client);
+    setDeploymentNote(
+        'dev: the search service runs in external mode — start it with ' +
+            '`node apps/desktop/test/fixtures/echo-service.mjs` and watch it turn running.',
+    );
+
+    // 搜索演示：走适配层代理调用外部领域服务。
+    const searchInput = document.querySelector<HTMLInputElement>('#search-input');
+    const runSearch = async (): Promise<void> => {
+        const query = searchInput?.value.trim();
+        if (!query) return;
+        try {
+            renderSearchResults(await client.invoke(contract.search.query, { query }));
+        } catch (cause) {
+            const described = describeError(cause) as { code?: string; message?: string };
+            logEvent(
+                `search failed: ${described.code ?? ''} ${described.message ?? cause}`,
+            );
+        }
+    };
+    document
+        .querySelector('#btn-search')
+        ?.addEventListener('click', () => void runSearch());
+    searchInput?.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') void runSearch();
     });
 
     try {

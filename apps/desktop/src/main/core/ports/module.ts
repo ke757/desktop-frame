@@ -4,6 +4,7 @@ import type { EventPublisher } from './event-publisher';
 import type { AppEnv } from './env';
 import type { RouteRegistrar } from './route-registrar';
 import type { ServiceRegistration } from './di';
+import type { DeploymentSpec } from './deployment';
 
 /**
  * 模块端口（driving port）：业务实现它、框架消费它——一个业务特性向
@@ -28,6 +29,8 @@ export interface AppModule {
     readonly id: string;
     /** 申报的服务注册（app 级单例，惰性构造）。 */
     readonly services?: ReadonlyArray<ServiceRegistration<unknown>>;
+    /** 申报本模块引入的外部部署（框架启动期注册给 DeploymentManager）。 */
+    readonly deployments?: ReadonlyArray<DeploymentSpec>;
     /** 向路由申报本模块的 IPC 端点。 */
     registerRoutes?(registrar: RouteRegistrar): void;
     /** 注册完成后、路由上线前执行（特性的启动仪式）。 */

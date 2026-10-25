@@ -79,6 +79,8 @@ squirrel → 单实例锁 → buildDesktopApp() → 全局异常兜底 → .run(
 | `di.ts`（ServiceToken/ServiceAccessor/DisposableService 等 DI 词汇） | core 的 ServiceContainer |
 | `route-registrar.ts`（RouteRegistrar + HandlerContext + RouteHandler） | core 的 IpcRouter |
 | `env.ts`（AppEnv 数据契约） | core 的 resolveEnv 产出 |
+| `process-host.ts`（ProcessHost + HostedProcess + SpawnOptions） | `electron/process-host.ts`（node:child_process 适配） |
+| `deployment.ts`（DeploymentManager + DeploymentSpec/Profile 数据契约） | core 的 `DeploymentManagerImpl` |
 
 判定口径：**接口存在是为了让 core 之外的某方实现或消费，才是 port**；框架自身实现（Lifecycle、ServiceContainer、IpcRouter、DesktopApp、builder）不是 port，不做每类一接口的抽象（无多实现前景、无仅内部可见的公开方法、同包同版本内 DIP 无收益）。`AppEnv` 作为共享内核数据契约随 ports 存放（适配器与业务共同消费）。
 
@@ -122,7 +124,7 @@ Electron 原生事件到状态机的映射（`core/desktop-app.ts` 的 `DesktopA
 | --- | --- | --- |
 | `lifespan` 管理的 app 级依赖（如 db） | `ServiceContainer` + `defineService(token, factory)` | 异步工厂、惰性实例化、memoize、逆序 dispose |
 | `Depends` 注入的请求级依赖 | `HandlerContext`（每次 IPC 调用构造） | 含 `services`/`log`/`events`/`sender`，随调用结束即弃 |
-| —（无对应） | 窗口级作用域 | 演进方向：多窗口时用子容器（见 §12） |
+| —（无对应） | 窗口级作用域 | 演进方向：多窗口时用子容器（见 §13） |
 
 ### 4.2 设计要点
 
@@ -263,25 +265,79 @@ dispose（唯一回收点）      关停 joiner 触发 container.dispose()
 
 **唯一回收点是应用关停**：joiner 管线（窗口先销毁、服务后 dispose）按**实例化逆序**调用 `dispose?.()`——依赖方先于被依赖方；单个失败记日志不阻断。没有运行期回收（无引用计数/空闲驱逐），服务与进程同寿命——刻意的简单性。边界情况：未实例化的服务 dispose 时是 no-op；忘写 dispose 只能靠 review（框架无法静态得知谁持资源）；进程被强杀时 joiner 不跑，持久化要按"随时可能死"设计（防抖 + 临时文件 + rename 原子写）。第二类回收（窗口级）由 P3 的 `createScope` 引入：`scope.dispose()` 随窗口关闭整支逆序释放，机制与 app 级完全同构。
 
-## 8. 开发与打包链路
+## 8. 外部服务控制平面（deployment）
+
+桌面应用把领域重活（索引、推理、媒体处理……）放进**独立可执行的外部领域服务**（sidecar），主进程只做编排与代理——与 VS Code 的 language server、Tauri 的 sidecar/shell 同型。为此框架提供两块基础设施：
+
+- **控制平面** `DeploymentManager`（`core/deployment/manager.ts`，核心部件）：管理外部程序的启动/停止、健康探测与状态跟踪；
+- **数据平面** `ExternalServiceClient`（`core/deployment/client.ts`）：适配层服务的通用代理客户端（HTTP + WebSocket，自动等待部署就绪）。
+
+```
+modules/search（适配层示例）
+  ├─ search.deployment.ts   DeploymentSpec（硬编码模块变量）
+  ├─ search.service.ts      SearchServiceImpl ── createExternalServiceClient ──┐
+  └─ search.module.ts        deployments:[spec] + services + routes             │ HTTP/WS
+                                                                             ▼
+AppModule.deployments ──→ DeploymentManager（core）── ProcessHost(端口) ──→ 外部可执行程序
+                              ▲  dev: DeploymentProfile 覆盖（external 模式）    (127.0.0.1)
+                              └─ 状态迁移 → appEvents.deploymentChanged → renderer
+```
+
+### 8.1 声明与运行模式
+
+- **DeploymentSpec**（模块变量，经 `AppModule.deployments` 申报）：`id`、`command/args/env/cwd`、`baseUrl`（仅 origin）、`health`（探测路径/间隔/超时，`false` 表示不探测）、`readyTimeoutMs`、`stopTimeoutMs`。
+- **managed 模式**（缺省）：框架经 `ProcessHost` 端口（`node:child_process` 适配器）拉起进程，轮询健康端点直到就绪；stdout/stderr 按行接入应用日志；停止走 `SIGTERM → 宽限 → SIGKILL` 的优雅终止。
+- **external 模式**：进程由外部运行（dev 下由开发者手动启动），框架只做就绪探测（无上限，直到上线或被停止）。**dev profile**（`desktopApp({ deploymentProfile })`，仅 `env.isDev` 时应用）把 spec 覆盖为 external——这是「开发期等用户手动启用外部服务」的机制；打包产物恒用原始 spec。
+
+### 8.2 部署状态机
+
+```
+registered ──start(managed)──→ starting ──健康通过──→ running ──stop──→ stopping ──→ stopped
+      └──start(external)──→ waiting ──探测通过──→ running        （宽限超时升级 SIGKILL）
+starting/waiting/running 的失败出口：failed（拉起失败/就绪超时）、crashed（运行中意外退出）
+```
+
+状态迁移经 `onChange` 订阅，由 DesktopApp 接线为 `appEvents.deploymentChanged` 广播；`deployments.list/start/stop/restart` RPC 端点（`modules/deployments`）供 renderer 的控制面面板使用。
+
+### 8.3 启动/关停时序（框架接线，业务不碰）
+
+| 阶段 | 行为 |
+| --- | --- |
+| `run()` 装配期 | 注册模块申报的 DeploymentSpec（profile 在此应用）→ `startAll()`：managed 并行拉起并等待就绪（或 failed）；external 挂探测即返回 |
+| 模块 init 前 | 部署已运转——适配层服务可假定控制面已开始工作（未就绪也只需等待 `whenReady`） |
+| shutdown joiner | 窗口先销毁 → 服务后 dispose → **外部进程最后终止**（dispose 期间仍可使用外部服务） |
+
+### 8.4 适配层服务模式（anti-corruption）
+
+外部服务的消费细节（URL、就绪等待、错误翻译、WS 重连）收敛在适配层服务里（示例 `modules/search`）：`createExternalServiceClient({ deployment, manager })` 提供 `request`（等就绪后 fetch）与 `socket`（等就绪后握手 WS）；HTTP 失败翻译为 `RpcError`，WS 推送桥接为内部事件（`appEvents.searchIndexChanged`）。内部消费方只面对普通的 `SearchService` 接口，外部服务的更迭不影响内部契约。
+
+### 8.5 已知边界（刻意的 v1 简单性）
+
+- 无自动重启：crash 后状态落 `crashed`，由用户/监控经 `restart` 端点重拉；自动重启策略（退避、次数上限）按需再演进。
+- external 模式就绪后不再持续探测，掉线要等调用失败才暴露；适配层的 WS 重连与 `whenReady` 重试是补偿手段。
+- 进程终止只杀直接子进程（无 tree-kill）；外部程序应自管其子进程。
+- 打包形态下外部可执行程序的分发（forge `extraResources`）与 `command` 的资源路径解析是接入真实服务时的工程项（见 §13 演进）。
+
+## 9. 开发与打包链路
 
 - **dev**：根 `pnpm dev` 并行起 web dev server（5173，strictPort）与 `forge start`。主进程 `waitForDevServer` 轮询等待（最多 30s）再开窗，规避启动顺序竞态。forge vite 插件配置 `renderer: []`（合法，实测验证），主进程/preload 热重启由插件负责，web 由 vite HMR 负责。
 - **package**：`forge.config.mts` 的 `prePackage` 钩子执行 `pnpm --filter web build`（产物输出到 `apps/desktop/web/`，`base: './'` 保证 file:// 可用）；`packagerConfig.ignore` 白名单只保留 `/.vite`、`/web`、`/package.json`。主进程依赖全部由 vite 内联进 `main.cjs`，asar 内零 node_modules。
 - 打包产物 `out/desktop-frame-darwin-arm64/`。
+- **外部服务（dev）**：dev profile 把 search 部署切到 external 模式，需手动启动演示服务 `node apps/desktop/test/fixtures/echo-service.mjs`（默认 7801 端口），主进程探测到后控制面面板转 running；不启动也不影响应用其余功能。
 
-## 9. 添加新业务模块（操作清单）
+## 10. 添加新业务模块（操作清单）
 
 1. **契约**：`packages/contracts/src/schemas.ts` 加 schema，`contract.ts` 加 `procedure('mod.action', In, Out)`（channel 唯一性有单测兜底）；事件加进 `appEvents`。
-2. **模块**：`apps/desktop/src/main/modules/mod/` 新建 `mod.service.ts`（接口 + token + `XxxServiceImpl`，见 §4.4）与 `mod.module.ts`（routes + init）；私有协作者放同目录独立文件（见 §7.3）。
+2. **模块**：`apps/desktop/src/main/modules/mod/` 新建 `mod.service.ts`（接口 + token + `XxxServiceImpl`，见 §4.4）与 `mod.module.ts`（routes + init）；私有协作者放同目录独立文件（见 §7.3）。若模块接入外部领域服务，再加 `mod.deployment.ts`（DeploymentSpec 模块变量）并走适配层模式（见 §8.4）。
 3. **装配**：`main/index.ts` 装配脚本 `.use(modModule)` 加一行（新窗口同理 `.window(...)`）。
 4. **前端**：web 侧 `client.invoke(contract.mod.action, input)` / `client.on(appEvents.modChanged, cb)`。
 5. **测试**：服务单测（注入 MemoryLogger + 内存 sink + tmpdir），路由行为已由 router 测试覆盖通用管线；涉及启动/关停时序的改动补 `desktop-app.integration.test.ts` 断言。
 
-## 10. 测试策略
+## 11. 测试策略
 
 三层测试全部不依赖 Electron：**单元层**覆盖容器（惰性/memoize/循环依赖/逆序 dispose/失败重试）、生命周期（转换约束/when/joiner 顺序与容错/幂等）、路由（白名单/门禁/双向校验/RpcError/信封）、事件发布（校验丢弃）、settings 服务（持久化往返/损坏文件回退/落盘）；**集成层**（`test/desktop-app.integration.test.ts`）用 FakeHost/FakeTransport/FakeWindowHost 驱动 `desktopApp().build().run()` 跑通 `build 只装配不启动 → ready → IPC 实调 → quit → 关停管线 → exited → run() resolve` 的完整生命周期——等价于 FastAPI TestClient 驱动 lifespan 的体验；**架构守护层**（`test/architecture.test.ts`）静态扫描 import 图，把 §7.2 的分层约定固化为可执行断言（core 零 electron、core 只依赖 core、modules 不碰适配层、跨模块 import 白名单）。electron 相关薄层（host 适配、窗口管理、preload）靠 dev/package 冒烟覆盖。
 
-## 11. 安全清单（对照官方 checklist）
+## 12. 安全清单（对照官方 checklist）
 
 - ✅ contextIsolation + sandbox 默认开启且显式声明；nodeIntegration 关闭。
 - ✅ preload 暴露最小面（通用 invoke/on），不暴露 `ipcRenderer`；事件订阅返回退订函数。
@@ -290,11 +346,12 @@ dispose（唯一回收点）      关停 joiner 触发 container.dispose()
 - ✅ web 页面 CSP meta（`script-src 'self'` 等；dev 放行 localhost HMR）。
 - ✅ Fuses：`EnableNodeCliInspectArguments`/`RunAsNode` 关闭，asar 完整性校验开启。
 
-## 12. 演进路线（按需启用，不要提前建）
+## 13. 演进路线（按需启用，不要提前建）
 
 - **窗口级作用域**：多窗口业务（如每窗口独立项目状态）时引入子容器（参照 VS Code `createChild`）+ 按 webContentsId 路由事件。
 - **关闭 veto 协议**：需要"有未保存数据时阻止关窗"时，参照 VS Code 逐窗口 `close` + `preventDefault` + 询问 renderer 的协议。
 - **utilityProcess 工作池**：CPU 密集/可崩溃隔离任务用 Electron `utilityProcess`（MessagePort、独立崩溃上报），封装为容器服务，dispose 时统一 kill。
+- **部署增强**：外部服务的自动重启（退避/次数上限）、external 模式的持续健康监视、tree-kill、打包形态的 extraResources 分发与资源路径解析（`process.resourcesPath` 进 AppEnv），均在接入真实外部服务时按需引入。
 - **自动更新 / 托盘**：electron-updater 的 `quitAndInstall` 与托盘"关窗不退出"都应注册为 shutdown joiner 并叠加 `isQuitting` 标志，而不是散落的 preventDefault。
 - **数据库/大状态**：settings.json 只适合小配置；结构化数据用 better-sqlite3（VS Code 与 Expo Orbit 同款选择），同样以 app 级服务 + dispose 关闭。
 - **前端框架**：web 当前为 vanilla TS 以保持零主张；引入 React/Vue 只动 `apps/web`，契约与主进程不变。

@@ -92,3 +92,97 @@ export const SettingsChangedEventSchema = z.object({
     /** 变更后的完整设置。 */
     settings: SettingsFileSchema,
 });
+
+/**
+ * 外部部署的运行状态（与 desktop 端 `core/ports/deployment.ts` 的
+ * `DeploymentState` 平行定义；一致性由 desktop 侧测试守护）。
+ */
+export const DeploymentStateSchema = z.enum([
+    /** 已注册（模块申报）但尚未启动。 */
+    'registered',
+    /** managed：进程已拉起，健康探测中。 */
+    'starting',
+    /** external：探测等待外部服务上线（dev 下等用户手动启动）。 */
+    'waiting',
+    /** 健康检查通过，可对外提供服务。 */
+    'running',
+    /** 停止流程进行中。 */
+    'stopping',
+    /** 已正常停止。 */
+    'stopped',
+    /** 启动失败（拉起失败或就绪超时）。 */
+    'failed',
+    /** 运行中意外退出。 */
+    'crashed',
+]);
+export type DeploymentState = z.infer<typeof DeploymentStateSchema>;
+
+/**
+ * 部署运行模式：managed = 框架托管进程生命周期；external = 进程由外部
+ * （开发者/运维）自行运行，框架只探测与连接。
+ */
+export const DeploymentModeSchema = z.enum(['managed', 'external']);
+export type DeploymentMode = z.infer<typeof DeploymentModeSchema>;
+
+/** 一个外部部署的当前状态快照（deployments.* 端点的输出项）。 */
+export const DeploymentStatusSchema = z.object({
+    /** 部署 id（即 DeploymentSpec.id）。 */
+    id: z.string(),
+    /** 当前运行状态。 */
+    state: DeploymentStateSchema,
+    /** 生效的运行模式（dev profile 覆盖后的）。 */
+    mode: DeploymentModeSchema,
+    /** 服务根地址（仅 origin）。 */
+    baseUrl: z.string(),
+    /** 托管进程 pid（external 模式或未拉起时为 null）。 */
+    pid: z.number().int().positive().nullable(),
+    /** 状态补充说明（失败原因、崩溃退出码等）。 */
+    detail: z.string().optional(),
+    /** 快照更新时间戳（ms）。 */
+    updatedAt: z.number(),
+});
+export type DeploymentStatus = z.infer<typeof DeploymentStatusSchema>;
+
+/** deployments.start/stop/restart 的输入。 */
+export const DeploymentIdSchema = z.object({
+    /** 目标部署 id。 */
+    id: z.string().min(1),
+});
+export type DeploymentId = z.input<typeof DeploymentIdSchema>;
+
+/** app.deploymentChanged 事件负载。 */
+export const DeploymentChangedEventSchema = z.object({
+    /** 变更后的部署状态快照。 */
+    deployment: DeploymentStatusSchema,
+});
+
+/** search.query 的输入。 */
+export const SearchQuerySchema = z.object({
+    /** 检索词。 */
+    query: z.string().min(1),
+});
+export type SearchQuery = z.input<typeof SearchQuerySchema>;
+
+/** 一条搜索命中（外部搜索服务的领域数据）。 */
+export const SearchHitSchema = z.object({
+    /** 命中条目的稳定 id。 */
+    id: z.string(),
+    /** 展示标题。 */
+    title: z.string(),
+    /** 相关度得分（0~1）。 */
+    score: z.number(),
+});
+export type SearchHit = z.infer<typeof SearchHitSchema>;
+
+/** search.query 的输出。 */
+export const SearchResponseSchema = z.object({
+    /** 命中列表。 */
+    hits: z.array(SearchHitSchema),
+});
+export type SearchResponse = z.infer<typeof SearchResponseSchema>;
+
+/** app.searchIndexChanged 事件负载（外部 WS 推送经适配层转发）。 */
+export const SearchIndexChangedEventSchema = z.object({
+    /** 外部报告的索引更新时间戳（ms）。 */
+    at: z.number(),
+});

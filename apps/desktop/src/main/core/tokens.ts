@@ -2,6 +2,7 @@ import { serviceToken } from './container';
 import type { EventPublisher } from './ports/event-publisher';
 import type { AppEnv } from './ports/env';
 import type { HostApp } from './ports/host';
+import type { DeploymentManager } from './ports/deployment';
 import type { Lifecycle } from './lifecycle';
 import type { Logger } from './ports/logger';
 import type { WindowHost } from './ports/window-host';
@@ -24,3 +25,5 @@ export const lifecycleToken = serviceToken<Lifecycle>('core.lifecycle');
 export const eventsToken = serviceToken<EventPublisher>('core.events');
 /** 窗口宿主（Electron 下为 WindowManager）。 */
 export const windowsToken = serviceToken<WindowHost>('core.windows');
+/** 外部部署控制面（DeploymentManager 公开接口，见 ports/deployment）。 */
+export const deploymentsToken = serviceToken<DeploymentManager>('core.deployments');
