@@ -1,0 +1,19 @@
+{
+    "name": "@desktop-frame/contracts",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "description": "Shared IPC contract between the Electron main process and the web frontend",
+    "exports": {
+        ".": "./src/index.ts"
+    },
+    "scripts": {
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "lint": "oxlint && oxfmt --check",
+        "lint:fix": "oxlint --fix && oxfmt --write"
+    },
+    "dependencies": {
+        "zod": "^4.6.7"
+    }
+}

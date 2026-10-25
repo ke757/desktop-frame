@@ -1,0 +1,174 @@
+:root {
+    color-scheme: light dark;
+    font-family:
+        -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
+        sans-serif;
+    line-height: 1.5;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: #f6f7f9;
+    color: #1a1d21;
+}
+
+@media (prefers-color-scheme: dark) {
+    body {
+        background: #16181c;
+        color: #e6e8eb;
+    }
+}
+
+main {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 32px 24px 64px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+header h1 {
+    font-size: 20px;
+    margin: 0;
+}
+
+.badge {
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid currentColor;
+}
+
+.badge[data-state='ready'] {
+    color: #137a3f;
+}
+
+.badge[data-state='initializing'] {
+    color: #8a6116;
+}
+
+.badge[data-state='shuttingDown'],
+.badge[data-state='exited'] {
+    color: #a12828;
+}
+
+section.card {
+    background: light-dark(#ffffff, #1e2126);
+    border: 1px solid light-dark(#e3e6ea, #2b2f35);
+    border-radius: 12px;
+    padding: 16px 20px;
+}
+
+section.card h2 {
+    font-size: 14px;
+    margin: 0 0 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    opacity: 0.65;
+}
+
+dl.info {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 16px;
+    margin: 0;
+    font-size: 13px;
+}
+
+dl.info dt {
+    opacity: 0.6;
+}
+
+dl.info dd {
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+button {
+    font: inherit;
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 1px solid light-dark(#cfd4da, #3a4047);
+    background: light-dark(#ffffff, #262a30);
+    color: inherit;
+    cursor: pointer;
+}
+
+button:hover {
+    border-color: #4c7cf5;
+}
+
+button.danger {
+    border-color: #a12828;
+    color: #a12828;
+}
+
+select {
+    font: inherit;
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid light-dark(#cfd4da, #3a4047);
+    background: light-dark(#ffffff, #262a30);
+    color: inherit;
+}
+
+pre {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: light-dark(#f1f3f5, #101216);
+    overflow-x: auto;
+    font-size: 12px;
+    min-height: 1.5em;
+}
+
+pre.error {
+    color: #d33a3a;
+}
+
+ul.log {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+ul.log li {
+    padding: 4px 0;
+    border-bottom: 1px solid light-dark(#eef0f3, #23262b);
+    display: flex;
+    gap: 10px;
+}
+
+ul.log li time {
+    opacity: 0.55;
+    flex-shrink: 0;
+}
+
+.note {
+    font-size: 13px;
+    opacity: 0.7;
+}

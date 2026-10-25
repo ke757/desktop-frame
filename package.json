@@ -1,0 +1,26 @@
+{
+  "name": "desktop-frame",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Electron desktop foundation: separate backend (apps/desktop) and web frontend (apps/web) sharing a typed IPC contract",
+  "license": "MIT",
+  "packageManager": "pnpm@11.8.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --stream --filter @desktop-frame/web --filter @desktop-frame/desktop run dev",
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "pnpm -r run lint",
+    "lint:fix": "pnpm -r run lint:fix"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "oxfmt": "^0.41.0",
+    "oxlint": "^1.89.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

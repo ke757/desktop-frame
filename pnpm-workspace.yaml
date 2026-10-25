@@ -1,0 +1,13 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+  - '!**/test/**'
+
+nodeLinker: hoisted
+
+# pnpm 11 dependency-build permissions.
+allowBuilds:
+  electron: true
+  esbuild: true
+  # Only needed when building Windows Squirrel installers.
+  electron-winstaller: false

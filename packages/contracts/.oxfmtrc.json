@@ -1,0 +1,7 @@
+{
+    "singleQuote": true,
+    "printWidth": 90,
+    "tabWidth": 4,
+    "sortPackageJson": false,
+    "ignorePatterns": [ "node_modules/", "dist/", "out/", ".vite/", "*.mts", "*.min.js" ]
+}
