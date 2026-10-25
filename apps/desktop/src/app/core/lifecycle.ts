@@ -45,7 +45,7 @@ export class LifecycleError extends Error {
 /** 生命周期状态机：状态迁移、变更订阅、关停 joiner 管线。 */
 export class LifecycleService {
     private currentState: LifecycleState = 'initializing';
-    private readonly waiters: Array<{ target: LifecycleState; resolve: () => void; }> = [];
+    private readonly waiters: Array<{ target: LifecycleState; resolve: () => void }> = [];
     private readonly shutdownJoiners: ShutdownJoiner[] = [];
     private readonly changeListeners: Array<(change: LifecycleChange) => void> = [];
 

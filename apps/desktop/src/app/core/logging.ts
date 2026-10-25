@@ -100,3 +100,45 @@ class TaggedLogger implements Logger {
         return new TaggedLogger(this.parent, `${this.label}:${module}`);
     }
 }
+
+/** 控制台 logger：builder 在未显式提供 logger 时的默认实现。 */
+class ConsoleLogger implements Logger {
+    /** 日志前缀链（子 logger 逐级拼接）。 */
+    private readonly prefix: string;
+
+    constructor(prefix = '') {
+        this.prefix = prefix;
+    }
+
+    debug(message: string, meta?: LogMeta): void {
+        this.emit('debug', message, meta);
+    }
+
+    info(message: string, meta?: LogMeta): void {
+        this.emit('info', message, meta);
+    }
+
+    warn(message: string, meta?: LogMeta): void {
+        this.emit('warn', message, meta);
+    }
+
+    error(message: string, meta?: LogMeta): void {
+        this.emit('error', message, meta);
+    }
+
+    child(module: string): Logger {
+        return new ConsoleLogger(this.prefix ? `${this.prefix}:${module}` : module);
+    }
+
+    private emit(level: string, message: string, meta?: LogMeta): void {
+        const line = this.prefix ? `[${this.prefix}] ${message}` : message;
+        const args = meta ? [line, meta] : [line];
+        const sink = console as unknown as Record<string, (...items: unknown[]) => void>;
+        sink[level](...args);
+    }
+}
+
+/** 创建默认控制台 logger（应用侧应传入 electron-log 实现）。 */
+export function createConsoleLogger(): Logger {
+    return new ConsoleLogger();
+}

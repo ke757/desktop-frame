@@ -1,5 +1,5 @@
 /**
- * 对 Electron `app` 模块的窄接口抽象。runtime 与生命周期编排只依赖
+ * 对 Electron `app` 模块的窄接口抽象。DesktopApp 与生命周期编排只依赖
  * 该抽象（不直接依赖 electron），从而可以在单测中用假 host 替换。
  */
 

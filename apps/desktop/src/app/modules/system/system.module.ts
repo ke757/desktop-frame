@@ -1,7 +1,7 @@
 import { BrowserWindow, dialog, webContents } from 'electron';
 import { RpcError, contract } from '@desktop-frame/contracts';
 import type { AppModule } from '../../core/module';
-import { hostToken } from '../../tokens';
+import { hostToken } from '../../core/tokens';
 
 /**
  * system 模块：演示如何消费 per-call 上下文——
@@ -54,6 +54,9 @@ export const systemModule: AppModule = {
         });
 
         registrar.handle(contract.system.quit, async (ctx) => {
+            // 经 hostToken 请求退出（host 即应用的"控制句柄"，对齐 Tauri
+            // AppHandle::exit 的角色）：触发 before-quit -> 关停管线。
+            // 响应信封大概率来不及送达，这是预期行为（应用正在退出）。
             const host = await ctx.services.get(hostToken);
             host.quit();
             return undefined;

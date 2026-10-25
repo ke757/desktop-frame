@@ -3,5 +3,5 @@
     "printWidth": 90,
     "tabWidth": 4,
     "sortPackageJson": false,
-    "ignorePatterns": [ "node_modules/", "dist/", ".vite/", "*.mts", "*.min.js" ]
+    "ignorePatterns": ["node_modules/", "dist/", ".vite/", "*.mts", "*.min.js"]
 }

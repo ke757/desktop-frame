@@ -17,7 +17,7 @@
 | 前后端拆分 | forge vite 插件 `renderer: []` 合法；dev 加载 web dev server URL、打包把 web 产物复制进 asar 是成熟模式 | plugin-vite 源码行为（已实测验证） |
 | 日志/校验 | electron-log v5 与 zod v4 是当前事实标准 | 两者官方文档 |
 
-## 2. 总体结构
+## 2. 总体结构与启动装配
 
 ```
 ┌────────────── apps/web（独立 Vite 项目，界面） ───────────────┐
@@ -36,9 +36,37 @@
 └──────────────────────────────────────────────────────────────┘
 ```
 
+### 2.1 启动装配（builder 形态，对齐 Tauri v2 / FastAPI）
+
+启动控制权在框架（总对象）而非调用方——业务只声明，框架驱动（FastAPI 的 `lifespan` 由框架调用；Tauri 的 `setup` 钩子与 `App::run` 事件循环同理）：
+
+```ts
+// app/index.ts —— 装配脚本（唯一声明"应用由什么组成"的地方）
+buildDesktopApp():
+  desktopApp({ host, transport, createWindows, mainDir, createLogger })
+      .use(systemModule, settingsModule)   // 声明业务模块
+      .window(createMainWindowDefinition()) // 声明窗口
+      .build();                            // 构造对象图，不启动（Tauri build 语义）
+
+// main.ts —— 进程壳（进程级策略集中于此，对齐 Tauri main.rs 的 .expect）
+squirrel → 单实例锁 → buildDesktopApp() → 全局异常兜底 → .run()
+  .catch(() => process.exit(1));
+```
+
+| Tauri v2 | 本基座 |
+| --- | --- |
+| `Builder::default().plugin().setup().manage()` | `desktopApp(opts).use(mod).window(def)` |
+| `build(context) → App`（不启动） | `.build() → DesktopApp`（不启动，对象图可检视） |
+| `App::run(cb)` 阻塞至退出 | `.run()` Promise 至 lifecycle `exited` |
+| `RunEvent::ExitRequested { api.prevent_exit() }` | `before-quit` preventDefault → joiner 管线 |
+| `setup(\|app\|)` 钩子 | `module.init(ctx)`（+ dispose/onShutdown = lifespan 关停段） |
+| `AppHandle::exit(code)` | `HostApp.quit()`（业务经 `hostToken` 取用；框架自身另有 `DesktopApp.quit()`） |
+
+**接线与声明的分离**是关键：核心对象的互连（lifecycle/container/windows/events/router 之间的构造注入）全部收敛在 `core/builder.ts` 的 `build()`——一次性框架代码，只在框架演进时改动且有集成测试守护；应用的高频变化（加模块、加窗口）只触碰装配脚本里的一行 `.use()` / `.window()`，不碰任何接线。核心对象间的"互含"用接口倒置消解（如 `EventPublisher` 依赖 `EventSink`/`WindowHost` 接口，`WindowManager` 是其 Electron 实现），构造顺序固定为 DAG。
+
 分层规则（保证可测试性的关键）：
 
-- `src/app/core/**`：**纯 TS，零 electron 依赖**。依赖注入用接口（`HostApp`、`IpcTransport`、`EventSink`、`Logger`），单测全部在这一层。
+- `src/app/core/**`：**纯 TS，零 electron 依赖**。依赖注入用接口（`HostApp`、`IpcTransport`、`WindowHost`、`Logger`），builder/DesktopApp/单测/集成测试全部在这一层。
 - `src/app/**`（core 之外）：electron 适配与业务。`electron-host.ts`、`electron-transport.ts`、`logging.ts`、`windows/` 是仅有的 import electron 的基础设施。
 - `src/main.ts` / `src/preload.ts`：仅有的两个构建入口。
 
@@ -52,15 +80,15 @@ initializing ──→ ready ──→ shuttingDown ──→ exited
 - **可等待**：`when(state)` 返回 Promise（已到达则立即 resolve），启动编排用它挂接阶段任务（对应 VS Code 的 `when(phase)`）。
 - **关停管线**：`onShutdown(joiner)` 注册清理函数，`shutdown()` 顺序执行、逐个容错（失败记日志不中断），最终落 `exited`。这是 VS Code `onWillShutdown` + `e.join()` 的等价物。
 
-Electron 原生事件到状态机的映射（`runtime.ts`）：
+Electron 原生事件到状态机的映射（`core/desktop-app.ts` 的 `DesktopApp.run()`）：
 
 | Electron 事件 | 行为 |
 | --- | --- |
-| `app.whenReady` | 注册模块服务 → 模块 init → 安装路由 → `ready` → 打开主窗口 |
-| `before-quit` | `preventDefault()` → `lifecycle.shutdown()`（窗口先关、服务后 dispose）→ `app.exit(0)` |
+| `app.whenReady` | 注册模块服务 → 模块 init → 安装路由 → `ready` → 打开主窗口 → 挂起等待 `exited` |
+| `before-quit` | `preventDefault()` → `lifecycle.shutdown()`（窗口先关、服务后 dispose）→ `host.exit(0)` |
 | `window-all-closed` | 非 macOS `quit()`（macOS 留 Dock，`activate` 重开窗口） |
-| `second-instance` | 聚焦已有主窗口（单实例锁在入口 `requestSingleInstanceLock`） |
-| `uncaughtException` / `unhandledRejection` | 记日志，不崩溃 |
+| `second-instance` | 聚焦已有主窗口（单实例锁在 `main.ts` 进程壳检查） |
+| `uncaughtException` / `unhandledRejection` | 记日志，不崩溃（`main.ts` 安装） |
 
 状态变化会通过 `app.lifecycleChanged` 事件广播给所有 renderer（web 界面左上角徽标实时显示）。
 
@@ -99,7 +127,7 @@ registrar.handle(contract.settings.getAll, async (ctx) => {
   return settings.get();
 });
 
-// 3) 启动编排（组合根直接持有引用，无需容器）
+// 3) 框架层（builder/DesktopApp 直接持有核心对象引用，无需容器）
 ```
 
 ## 5. 类型安全 IPC（`core/ipc/` + `packages/contracts`）
@@ -147,7 +175,7 @@ frame 来源白名单校验 → 生命周期门禁(ready) → 输入 zod 校验
 
 ## 7. 模块协议（`core/module.ts`）
 
-业务特性以模块接入：`{ id, services?, registerRoutes?, init? }`。组合根（`app/index.ts`）只做装配。启动顺序：注册服务 → 注册路由 → 模块 init → 路由上线 → `ready` → 开窗。示例模块 `system`（窗口关联 dialog、RpcError 演示、退出）与 `settings`（app 级服务：JSON 持久化 + 防抖落盘 + dispose flush + 变更事件）。
+业务特性以模块接入：`{ id, services?, registerRoutes?, init? }`。装配脚本（`app/index.ts`）只做声明，框架在 `run()` 中按固定时序调用：注册服务 → 注册路由 → 模块 init → 路由上线 → `ready` → 开窗。示例模块 `system`（窗口关联 dialog、RpcError 演示、编程式退出）与 `settings`（app 级服务：JSON 持久化 + 防抖落盘 + dispose flush + 变更事件）。
 
 ## 8. 开发与打包链路
 
@@ -159,13 +187,13 @@ frame 来源白名单校验 → 生命周期门禁(ready) → 输入 zod 校验
 
 1. **契约**：`packages/contracts/src/schemas.ts` 加 schema，`contract.ts` 加 `procedure('mod.action', In, Out)`（channel 唯一性有单测兜底）；事件加进 `appEvents`。
 2. **模块**：`apps/desktop/src/app/modules/mod/` 新建 `mod.service.ts`（`defineService` + token + `dispose`）与 `mod.module.ts`（routes + init）。
-3. **装配**：`app/index.ts` 的 `modules` 数组加一行。
+3. **装配**：`app/index.ts` 装配脚本 `.use(modModule)` 加一行（新窗口同理 `.window(...)`）。
 4. **前端**：web 侧 `client.invoke(contract.mod.action, input)` / `client.on(appEvents.modChanged, cb)`。
-5. **测试**：服务单测（注入 MemoryLogger + 内存 sink + tmpdir），路由行为已由 router 测试覆盖通用管线。
+5. **测试**：服务单测（注入 MemoryLogger + 内存 sink + tmpdir），路由行为已由 router 测试覆盖通用管线；涉及启动/关停时序的改动补 `desktop-app.integration.test.ts` 断言。
 
 ## 10. 测试策略
 
-核心 38 个单测全部不依赖 Electron：容器（惰性/memoize/循环依赖/逆序 dispose/失败重试）、生命周期（转换约束/when/joiner 顺序与容错/幂等）、路由（白名单/门禁/双向校验/RpcError/信封）、事件发布（校验丢弃）、settings 服务（持久化往返/损坏文件回退/落盘）。electron 相关薄层（host 适配、窗口管理、preload）靠 dev/package 冒烟覆盖。
+42 个测试全部不依赖 Electron：单元层覆盖容器（惰性/memoize/循环依赖/逆序 dispose/失败重试）、生命周期（转换约束/when/joiner 顺序与容错/幂等）、路由（白名单/门禁/双向校验/RpcError/信封）、事件发布（校验丢弃）、settings 服务（持久化往返/损坏文件回退/落盘）；**集成层**（`test/desktop-app.integration.test.ts`）用 FakeHost/FakeTransport/FakeWindowHost 驱动 `desktopApp().build().run()` 跑通 `build 只装配不启动 → ready → IPC 实调 → quit → 关停管线 → exited → run() resolve` 的完整生命周期——等价于 FastAPI TestClient 驱动 lifespan 的体验。electron 相关薄层（host 适配、窗口管理、preload）靠 dev/package 冒烟覆盖。
 
 ## 11. 安全清单（对照官方 checklist）
 

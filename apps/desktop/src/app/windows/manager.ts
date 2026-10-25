@@ -1,20 +1,15 @@
 import { BrowserWindow } from 'electron';
 import type { AppEnv } from '../core/env';
-import type { EventSink } from '../core/ipc/events';
 import type { Logger } from '../core/logging';
+import type { WindowDefinition as CoreWindowDefinition } from '../core/window';
+import type { WindowHost } from '../core/window';
 
 /**
- * 声明式窗口配方。`create` 负责构造 BrowserWindow（安全偏好写在这里）；
- * 加载 renderer 入口、ready-to-show 后显示、跟踪与清理由管理器统一处理。
+ * Electron 侧的窗口配方（收窄 core 的 WindowDefinition）：`create` 负责构造
+ * BrowserWindow（安全偏好写在这里）；加载 renderer 入口、ready-to-show 后
+ * 显示、跟踪与清理由管理器统一处理。
  */
-export interface WindowDefinition {
-    /** 窗口定义 id。 */
-    readonly id: string;
-    /** 是否主窗口（second-instance/activate 时聚焦/重开它）。 */
-    readonly isPrimary?: boolean;
-    /** 按环境构造 BrowserWindow。 */
-    create(env: AppEnv): BrowserWindow;
-}
+export type WindowDefinition = CoreWindowDefinition<BrowserWindow>;
 
 /** 一个被管理窗口的运行时记录。 */
 export interface ManagedWindow {
@@ -28,10 +23,10 @@ export interface ManagedWindow {
 
 /**
  * 窗口生命周期的唯一管理者：创建、跟踪、事件扇出与有序关闭。
- * 实现 EventSink，使类型化事件广播到每个存活的 renderer。
+ * 实现 core 的 WindowHost（DesktopApp 依赖该抽象，测试用 Fake 替换）。
  */
-export class WindowManager implements EventSink {
-    private readonly definitions = new Map<string, WindowDefinition>();
+export class WindowManager implements WindowHost {
+    private readonly definitions = new Map<string, CoreWindowDefinition>();
     private readonly open = new Map<string, ManagedWindow>();
 
     constructor(
@@ -40,7 +35,7 @@ export class WindowManager implements EventSink {
     ) {}
 
     /** 注册窗口定义（id 重复抛错）。 */
-    register(definition: WindowDefinition): void {
+    register(definition: CoreWindowDefinition): void {
         if (this.definitions.has(definition.id)) {
             throw new Error(`window definition already registered: ${definition.id}`);
         }
@@ -70,7 +65,7 @@ export class WindowManager implements EventSink {
             throw new Error(`unknown window definition: ${definitionId}`);
         }
 
-        const win = definition.create(this.env);
+        const win = definition.create(this.env) as BrowserWindow;
         const managed: ManagedWindow = {
             definitionId,
             win,

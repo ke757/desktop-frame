@@ -9,7 +9,7 @@ import {
 import { defineService, serviceToken } from '../../core/container';
 import type { EventPublisher } from '../../core/ipc/events';
 import type { Logger } from '../../core/logging';
-import { envToken, eventsToken, loggerToken } from '../../tokens';
+import { envToken, eventsToken, loggerToken } from '../../core/tokens';
 
 /** 防抖落盘间隔（ms）。 */
 const FLUSH_DEBOUNCE_MS = 500;

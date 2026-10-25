@@ -18,7 +18,12 @@
 
 ## 代码结构规则
 
-- `apps/desktop/src/app/core/**` 必须保持**零 electron import**（依赖一律走 `HostApp`/`IpcTransport`/`EventSink`/`Logger` 接口），这是单测可跑的前提。electron 只允许出现在：`src/main.ts`、`src/preload.ts`、`app/electron-host.ts`、`app/electron-transport.ts`、`app/logging.ts`、`app/windows/**`、业务模块里对 `dialog`/`BrowserWindow` 的直接使用。
+- `apps/desktop/src/app/core/**` 必须保持**零 electron import**（依赖一律走 `HostApp`/`IpcTransport`/`WindowHost`/`Logger` 接口），这是单测/集成测试可跑的前提。electron 只允许出现在：`src/main.ts`、`src/preload.ts`、`app/electron-host.ts`、`app/electron-transport.ts`、`app/logging.ts`、`app/windows/**`、业务模块里对 `dialog`/`BrowserWindow` 的直接使用。
+- 启动分层（对齐 Tauri `Builder → build → run` / FastAPI lifespan 反转）：
+  - `src/main.ts`：进程壳，只承载进程级策略（squirrel、单实例锁、全局异常、fatal 退出码）。
+  - `app/index.ts`：装配脚本，只声明"应用由什么组成"（`.use()` 模块、`.window()` 窗口、注入 electron 适配）。
+  - `core/builder.ts`：`desktopApp()` DSL + 框架接线（`build()` 内的核心对象互连是全仓库唯一接线点，只在框架演进时改动，业务变化不碰它）。
+  - `core/desktop-app.ts`：`DesktopApp` 总对象，拥有从启动到退出的完整生命周期；`run()` 在 lifecycle 到 `exited` 后 resolve。注意所有权方向是 `app → container` 单向：**DesktopApp 本身不注册进容器**（组合根不是自己的服务节点），业务需要退出等应用级能力时走 `hostToken`。
 - 入口只有两个：`src/main.ts`、`src/preload.ts`（forge 按文件名产出 main.cjs/preload.cjs，勿改名/移入子目录）。
 - preload 处于沙箱（Electron 45 无 Buffer/events/timers shim），只能用 `electron` 模块与 Web 标准 API；桥保持通用（string channel），契约变化不改 preload。
 - 跨进程通信一律走 `packages/contracts`：新增端点 = schema + procedure，channel 名必须唯一（有单测）。不要手写 ipcMain.handle/ipcRenderer.send 绕过路由。
@@ -40,6 +45,7 @@
 ## 约定的文件去向
 
 - 新 schema/端点 → `packages/contracts/src/{schemas,contract}.ts`
-- 新业务模块 → `apps/desktop/src/app/modules/<module>/<module>.{service,module}.ts`，并在 `app/index.ts` 装配
-- 新窗口 → `app/windows/definitions.ts` 加 WindowDefinition，并在组合根 `windows.register(...)`
-- 全局清理逻辑 → `app/runtime.ts` 的生命周期接线处
+- 新业务模块 → `apps/desktop/src/app/modules/<module>/<module>.{service,module}.ts`，并在 `app/index.ts` 装配脚本 `.use()` 一行接入
+- 新窗口 → `app/windows/definitions.ts` 加 WindowDefinition，并在 `app/index.ts` `.window()` 一行接入
+- 新核心服务/框架接线调整 → `core/builder.ts`（build() 内）+ `core/tokens.ts`；此类改动属于框架演进，必须伴随集成测试
+- 全局清理逻辑 → `core/desktop-app.ts` 的 `wireHostEvents()` 生命周期接线处（shutdown joiner）
