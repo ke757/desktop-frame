@@ -1,10 +1,10 @@
 import { desktopApp } from './core/builder';
 import type { DesktopApp } from './core/desktop-app';
-import { createElectronHost } from './electron-host';
-import { createElectronIpcTransport } from './electron-transport';
-import { createAppLogger } from './logging';
-import { WindowManager } from './windows/manager';
-import { createMainWindowDefinition } from './windows/definitions';
+import { createElectronHost } from './electron/host';
+import { createElectronIpcTransport } from './electron/ipc-transport';
+import { createAppLogger } from './electron/logging';
+import { WindowManager } from './electron/windows-manager';
+import { createMainWindowDefinition } from './windows';
 import { settingsModule } from './modules/settings/settings.module';
 import { systemModule } from './modules/system/system.module';
 

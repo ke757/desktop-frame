@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron';
-import type { IpcListener, IpcTransport } from './core/ipc/router';
+import type { IpcListener, IpcTransport } from '../core/ports/ipc-transport';
 
 /**
  * 把路由绑定到 electron 的 ipcMain。listener 恒以信封 resolve；

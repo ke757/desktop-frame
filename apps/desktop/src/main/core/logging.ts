@@ -1,23 +1,8 @@
 /**
- * Logger 接口：应用侧由 electron-log 实现，测试侧由 MemoryLogger 实现。
- * 核心框架代码只依赖此接口。
+ * Logger 的实现集合：测试用 MemoryLogger、缺省 ConsoleLogger。
+ * Logger 接口本体在 ports/logger.ts（应用侧由 electron/logging.ts 实现）。
  */
-
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
-export type LogMeta = Record<string, unknown>;
-
-export interface Logger {
-    /** 记录 debug 级日志。 */
-    debug(message: string, meta?: LogMeta): void;
-    /** 记录 info 级日志。 */
-    info(message: string, meta?: LogMeta): void;
-    /** 记录 warn 级日志。 */
-    warn(message: string, meta?: LogMeta): void;
-    /** 记录 error 级日志。 */
-    error(message: string, meta?: LogMeta): void;
-    /** 派生子 logger，每条日志带上模块名标签。 */
-    child(module: string): Logger;
-}
+import type { LogLevel, LogMeta, Logger } from './ports/logger';
 
 /** 一条日志记录。 */
 export interface LogEntry {

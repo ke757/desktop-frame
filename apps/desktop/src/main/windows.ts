@@ -1,6 +1,6 @@
 import { BrowserWindow } from 'electron';
-import type { AppEnv } from '../core/env';
-import type { WindowDefinition } from './manager';
+import type { AppEnv } from './core/ports/env';
+import type { WindowDefinition } from './core/ports/window-host';
 
 /** 主窗口定义 id。 */
 export const MAIN_WINDOW_ID = 'main';

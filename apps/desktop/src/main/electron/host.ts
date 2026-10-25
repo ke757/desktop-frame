@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import type { BeforeQuitEvent, HostApp } from './core/host';
+import type { BeforeQuitEvent, HostApp } from '../core/ports/host';
 
 /** 把 electron 的 `app` 模块适配为接口 HostApp。 */
 export function createElectronHost(): HostApp {

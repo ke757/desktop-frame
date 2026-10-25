@@ -1,33 +1,6 @@
 import path from 'node:path';
-import type { HostApp } from './host';
-
-/** renderer 入口：dev 为 dev server URL，打包后为本地文件。 */
-export type RendererEntry = { kind: 'url'; url: string } | { kind: 'file'; path: string };
-
-/** 环境信息：路径、入口与安全白名单的单一来源。 */
-export interface AppEnv {
-    /** 是否为开发模式（未打包）。 */
-    readonly isDev: boolean;
-    /** web dev server 地址（仅 dev 模式存在）。 */
-    readonly devServerUrl: string | undefined;
-    /** 应用名。 */
-    readonly appName: string;
-    /** 应用版本。 */
-    readonly appVersion: string;
-    /** userData 目录（设置、日志等落盘位置）。 */
-    readonly userDataPath: string;
-    /** 构建产物 main bundle 所在目录（运行时为 .vite/build）。 */
-    readonly mainDir: string;
-    /** preload 脚本绝对路径。 */
-    readonly preloadPath: string;
-    /** renderer 加载入口。 */
-    rendererEntry: RendererEntry;
-    /**
-     * 允许调用特权 IPC handler 的 frame 来源。dev 放行 web dev server，
-     * 打包后只放行 file:// 页面。
-     */
-    allowedFrameOrigins: readonly string[];
-}
+import type { AppEnv, RendererEntry } from './ports/env';
+import type { HostApp } from './ports/host';
 
 /** dev 模式下 web dev server 的默认地址（可用 WEB_DEV_SERVER_URL 覆盖）。 */
 export const DEFAULT_DEV_SERVER_URL = 'http://localhost:5173';

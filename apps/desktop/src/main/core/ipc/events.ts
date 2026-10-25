@@ -1,17 +1,13 @@
 import type { EventDefinition, EventPayload } from '@desktop-frame/contracts';
-import type { Logger } from '../logging';
+import type { EventPublisher } from '../ports/event-publisher';
+import type { EventSink } from '../ports/event-sink';
+import type { Logger } from '../ports/logger';
 
 /**
- * 事件出口：把事件投递给 renderer（由 WindowManager 通过
- * `webContents.send` 实现）。抽象出接口使事件发布可脱离窗口单测。
+ * 事件发布器的实现（接口见 ports/event-publisher.ts）：
+ * 校验负载后经 EventSink 扇出；校验失败记日志并丢弃。
  */
-export interface EventSink {
-    /** 向所有（或指定的）存活 renderer 发送一条事件。 */
-    send(channel: string, payload: unknown): void;
-}
-
-/** 类型化的 main→renderer 事件发布器（带负载校验）。 */
-export class EventPublisher {
+export class EventPublisherImpl implements EventPublisher {
     constructor(
         private readonly sink: EventSink,
         private readonly logger: Logger,

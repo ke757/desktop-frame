@@ -1,4 +1,11 @@
-import type { Logger } from './logging';
+import type {
+    DisposableService,
+    ServiceAccessor,
+    ServiceFactory,
+    ServiceRegistration,
+    ServiceToken,
+} from './ports/di';
+import type { Logger } from './ports/logger';
 
 /**
  * 轻量异步服务容器（composition-root 风格的 DI）。
@@ -15,40 +22,9 @@ import type { Logger } from './logging';
  * 并行获取重叠子图。
  */
 
-/** 服务 token：运行时只有字符串 id，`__type` 仅承载幻影类型。 */
-export interface ServiceToken<T> {
-    /** 服务唯一标识（注册与查找的键）。 */
-    readonly id: string;
-    /** 幻影类型载体，运行时永不赋值。 */
-    readonly __type?: T;
-}
-
 /** 创建一个类型化服务 token。 */
 export function serviceToken<T>(id: string): ServiceToken<T> {
     return { id };
-}
-
-/** 服务获取器：在工厂或 handler 内按 token 取依赖。 */
-export interface ServiceAccessor {
-    /** 获取（必要时创建）token 对应的服务实例。 */
-    get<T>(token: ServiceToken<T>): Promise<T>;
-}
-
-/** 拥有资源的服务可实现 `dispose`，由容器在关停时逆序调用。 */
-export interface DisposableService {
-    /** 释放资源；容器保证只在关停管线中调用一次。 */
-    dispose?(): void | Promise<void>;
-}
-
-/** 服务工厂：通过 accessor 声明并获取依赖，返回服务实例。 */
-export type ServiceFactory<T> = (accessor: ServiceAccessor) => T | Promise<T>;
-
-/** 一项服务注册：token + 工厂。 */
-export interface ServiceRegistration<T> {
-    /** 服务 token。 */
-    readonly token: ServiceToken<T>;
-    /** 服务工厂。 */
-    readonly factory: ServiceFactory<T>;
 }
 
 /**

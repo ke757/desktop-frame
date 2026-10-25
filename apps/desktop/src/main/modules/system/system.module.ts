@@ -1,7 +1,7 @@
 import { BrowserWindow, dialog, webContents } from 'electron';
 import { RpcError, contract } from '@desktop-frame/contracts';
-import type { AppModule } from '../../core/module';
-import { hostToken } from '../../core/tokens';
+import type { AppModule } from '../../core';
+import { hostToken } from '../../core';
 
 /**
  * system 模块：演示如何消费 per-call 上下文——

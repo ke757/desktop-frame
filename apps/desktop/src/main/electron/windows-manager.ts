@@ -1,8 +1,8 @@
 import { BrowserWindow } from 'electron';
-import type { AppEnv } from '../core/env';
-import type { Logger } from '../core/logging';
-import type { WindowDefinition as CoreWindowDefinition } from '../core/window';
-import type { WindowHost } from '../core/window';
+import type { AppEnv } from '../core/ports/env';
+import type { Logger } from '../core/ports/logger';
+import type { WindowDefinition as CoreWindowDefinition } from '../core/ports/window-host';
+import type { WindowHost } from '../core/ports/window-host';
 
 /**
  * Electron 侧的窗口配方（收窄 core 的 WindowDefinition）：`create` 负责构造

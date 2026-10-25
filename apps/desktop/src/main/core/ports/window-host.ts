@@ -1,9 +1,9 @@
 import type { AppEnv } from './env';
-import type { EventSink } from './ipc/events';
+import type { EventSink } from './event-sink';
 
 /**
- * 窗口配方（core 侧纯接口）。`create` 返回宿主窗口对象（Electron 下为
- * BrowserWindow）；具体类型由 app 层的窗口管理器收窄。
+ * 窗口端口（core 侧纯接口）。`create` 返回宿主窗口对象（Electron 下为
+ * BrowserWindow）；具体类型由适配层（electron/windows-manager.ts）收窄。
  */
 export interface WindowDefinition<W = unknown> {
     /** 窗口定义的唯一 id。 */
@@ -15,9 +15,9 @@ export interface WindowDefinition<W = unknown> {
 }
 
 /**
- * 窗口宿主抽象：DesktopApp 依赖此接口而非具体窗口管理器，使组合根
- * （builder.build）保持零 electron 依赖、可用 FakeWindowHost 做集成测试。
- * app/windows/manager.ts 的 WindowManager 是它的 Electron 实现。
+ * 窗口宿主端口：DesktopApp 依赖此抽象而非具体窗口管理器，使框架核心
+ * 保持零 electron 依赖、可用 FakeWindowHost 做集成测试。
+ * Electron 实现见 electron/windows-manager.ts（WindowManager）。
  */
 export interface WindowHost extends EventSink {
     /** 注册一个窗口定义（id 重复抛错）。 */

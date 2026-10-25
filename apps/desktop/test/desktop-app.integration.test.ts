@@ -3,14 +3,18 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { desktopApp } from '../src/app/core/builder';
-import type { HostApp, BeforeQuitEvent } from '../src/app/core/host';
-import type { IpcTransport, IpcListener, IpcCallInfo } from '../src/app/core/ipc/router';
+import { desktopApp } from '../src/main/core/builder';
+import type { HostApp, BeforeQuitEvent } from '../src/main/core/ports/host';
+import type {
+    IpcTransport,
+    IpcListener,
+    IpcCallInfo,
+} from '../src/main/core/ports/ipc-transport';
 import type { RpcResult } from '@desktop-frame/contracts';
-import { MemoryLogger } from '../src/app/core/logging';
-import type { WindowDefinition, WindowHost } from '../src/app/core/window';
-import { settingsToken } from '../src/app/modules/settings/settings.service';
-import { settingsModule } from '../src/app/modules/settings/settings.module';
+import { MemoryLogger } from '../src/main/core/logging';
+import type { WindowDefinition, WindowHost } from '../src/main/core/ports/window-host';
+import { settingsToken } from '../src/main/modules/settings/settings.service';
+import { settingsModule } from '../src/main/modules/settings/settings.module';
 
 /** HostApp 假实现：isPackaged=true 走 file 入口（跳过 dev server 等待）。 */
 class FakeHost implements HostApp {

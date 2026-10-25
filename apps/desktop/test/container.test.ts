@@ -5,8 +5,8 @@ import {
     ServiceContainer,
     UnknownServiceError,
     CyclicDependencyError,
-} from '../src/app/core/container';
-import { MemoryLogger } from '../src/app/core/logging';
+} from '../src/main/core/container';
+import { MemoryLogger } from '../src/main/core/logging';
 
 /** 测试用示例服务接口。 */
 interface Repo {

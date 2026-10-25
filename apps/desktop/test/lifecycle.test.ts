@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Lifecycle } from '../src/app/core/lifecycle';
-import { MemoryLogger } from '../src/app/core/logging';
+import { Lifecycle } from '../src/main/core/lifecycle';
+import { MemoryLogger } from '../src/main/core/logging';
 
 describe('Lifecycle', () => {
     it('初始状态为 initializing', () => {

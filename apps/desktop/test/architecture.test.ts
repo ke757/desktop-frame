@@ -3,13 +3,13 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
- * 架构守护测试：把 AGENTS.md 中的分层约定固化为可执行断言。
- * 改动 src/app 结构前先跑这里——红了说明破坏了约定，不是测试的问题。
+ * 架构守护测试：把 AGENTS.md 的分层约定固化为可执行断言。
+ * 改动 src/main 结构前先跑这里——红了说明破坏了约定，不是测试的问题。
  */
 
-const appRoot = path.resolve(__dirname, '../src/app');
+const appRoot = path.resolve(__dirname, '../src/main');
 
-/** 递归收集 app 下全部 .ts 源文件。 */
+/** 递归收集 main 下全部 .ts 源文件。 */
 const sourceFiles = (() => {
     const result: string[] = [];
     const collect = (dir: string): void => {
@@ -41,12 +41,12 @@ function importsOf(file: string): ImportSpec[] {
     return specs.map((spec) => ({ from: file, spec }));
 }
 
-/** 相对 app 根的 POSIX 风格路径。 */
+/** 相对 main 根的 POSIX 风格路径。 */
 function rel(file: string): string {
     return path.relative(appRoot, file).split(path.sep).join('/');
 }
 
-/** 相对说明符解析到 app 根相对路径（扩展名可省略）。 */
+/** 相对说明符解析到 main 根相对路径（扩展名可省略）。 */
 function resolveSpec(source: string, spec: string): string | undefined {
     if (!spec.startsWith('.')) return undefined;
     const base = path.relative(appRoot, path.resolve(path.dirname(source), spec));
@@ -55,7 +55,7 @@ function resolveSpec(source: string, spec: string): string | undefined {
 
 const allImports = sourceFiles.flatMap(importsOf);
 
-describe('架构守护：core 零 electron 且只依赖 core', () => {
+describe('架构守护：core 与 ports', () => {
     it("core/** 不得 import 'electron'", () => {
         const violations = allImports.filter(
             ({ from, spec }) =>
@@ -72,20 +72,40 @@ describe('架构守护：core 零 electron 且只依赖 core', () => {
         });
         expect(violations.map((v) => `${rel(v.from)} -> ${v.spec}`)).toEqual([]);
     });
+
+    it('ports/** 只依赖 ports（不得 import core 实现侧文件）', () => {
+        const violations = allImports.filter(({ from, spec }) => {
+            if (!rel(from).startsWith('core/ports/')) return false;
+            const target = resolveSpec(from, spec);
+            return target !== undefined && !target.startsWith('core/ports/');
+        });
+        expect(violations.map((v) => `${rel(v.from)} -> ${v.spec}`)).toEqual([]);
+    });
 });
 
 describe('架构守护：modules 边界', () => {
-    it('modules/** 不得 import 适配层（electron-host/electron-transport/windows/**）', () => {
+    it('modules/** 不得 import 适配层与装配层（../electron、../index、../windows）', () => {
         const violations = allImports.filter(({ from, spec }) => {
             if (!rel(from).startsWith('modules/')) return false;
             const target = resolveSpec(from, spec);
             if (target === undefined) return false;
             return (
-                target.startsWith('windows/') ||
-                target === 'electron-host' ||
-                target === 'electron-transport' ||
-                target === 'index'
+                target.startsWith('electron/') ||
+                target === 'index' ||
+                target === 'windows' ||
+                target.startsWith('windows/')
             );
+        });
+        expect(violations.map((v) => `${rel(v.from)} -> ${v.spec}`)).toEqual([]);
+    });
+
+    it("modules/** 对 core 只允许经 barrel（'../../core'）导入", () => {
+        const violations = allImports.filter(({ from, spec }) => {
+            if (!rel(from).startsWith('modules/')) return false;
+            const target = resolveSpec(from, spec);
+            if (target === undefined) return false;
+            // 允许：core barrel 本身；禁止：core 的任何深层路径。
+            return target.startsWith('core/');
         });
         expect(violations.map((v) => `${rel(v.from)} -> ${v.spec}`)).toEqual([]);
     });
@@ -100,6 +120,19 @@ describe('架构守护：modules 边界', () => {
             if (targetModule === sourceModule) return false;
             const basename = path.basename(target);
             return !/\.(service|module|tokens)$/.test(basename);
+        });
+        expect(violations.map((v) => `${rel(v.from)} -> ${v.spec}`)).toEqual([]);
+    });
+});
+
+describe('架构守护：electron 适配层', () => {
+    it('electron/** 对 core 的 import 只允许指向 core/ports/**（端口镜像）', () => {
+        const violations = allImports.filter(({ from, spec }) => {
+            if (!rel(from).startsWith('electron/')) return false;
+            const target = resolveSpec(from, spec);
+            if (target === undefined) return false;
+            if (!target.startsWith('core/')) return false;
+            return !target.startsWith('core/ports/');
         });
         expect(violations.map((v) => `${rel(v.from)} -> ${v.spec}`)).toEqual([]);
     });

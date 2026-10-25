@@ -1,10 +1,10 @@
 import { serviceToken } from './container';
-import type { EventPublisher } from './ipc/events';
-import type { AppEnv } from './env';
-import type { HostApp } from './host';
+import type { EventPublisher } from './ports/event-publisher';
+import type { AppEnv } from './ports/env';
+import type { HostApp } from './ports/host';
 import type { Lifecycle } from './lifecycle';
-import type { Logger } from './logging';
-import type { WindowHost } from './window';
+import type { Logger } from './ports/logger';
+import type { WindowHost } from './ports/window-host';
 
 /**
  * builder.build 注册的核心服务 token——全部是 DesktopApp 的"部件"，

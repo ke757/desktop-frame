@@ -1,14 +1,14 @@
 import { appEvents } from '@desktop-frame/contracts';
 import type { ServiceContainer } from './container';
-import type { AppEnv } from './env';
-import type { HostApp } from './host';
-import type { EventPublisher } from './ipc/events';
+import type { AppEnv } from './ports/env';
+import type { HostApp } from './ports/host';
+import type { EventPublisher } from './ports/event-publisher';
 import type { IpcRouter } from './ipc/router';
-import type { IpcTransport } from './ipc/router';
+import type { IpcTransport } from './ports/ipc-transport';
 import type { Lifecycle } from './lifecycle';
-import type { Logger } from './logging';
-import type { AppModule } from './module';
-import type { WindowHost } from './window';
+import type { Logger } from './ports/logger';
+import type { AppModule } from './ports/module';
+import type { WindowHost } from './ports/window-host';
 
 /** DesktopApp 的组成部件（全部由 builder.build 构造并注入）。 */
 export interface DesktopAppParts {

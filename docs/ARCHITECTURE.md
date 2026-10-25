@@ -41,7 +41,7 @@
 启动控制权在框架（总对象）而非调用方——业务只声明，框架驱动（FastAPI 的 `lifespan` 由框架调用；Tauri 的 `setup` 钩子与 `App::run` 事件循环同理）：
 
 ```ts
-// app/index.ts —— 装配脚本（唯一声明"应用由什么组成"的地方）
+// main/index.ts —— 装配脚本（唯一声明"应用由什么组成"的地方）
 buildDesktopApp():
   desktopApp({ host, transport, createWindows, mainDir, createLogger })
       .use(systemModule, settingsModule)   // 声明业务模块
@@ -64,10 +64,30 @@ squirrel → 单实例锁 → buildDesktopApp() → 全局异常兜底 → .run(
 
 **接线与声明的分离**是关键：核心对象的互连（lifecycle/container/windows/events/router 之间的构造注入）全部收敛在 `core/builder.ts` 的 `build()`——一次性框架代码，只在框架演进时改动且有集成测试守护；应用的高频变化（加模块、加窗口）只触碰装配脚本里的一行 `.use()` / `.window()`，不碰任何接线。核心对象间的"互含"用接口倒置消解（如 `EventPublisher` 依赖 `EventSink`/`WindowHost` 接口，`WindowManager` 是其 Electron 实现），构造顺序固定为 DAG。
 
-分层规则（保证可测试性的关键）：
+### 2.2 端口与适配器（六边形架构的显式化）
 
-- `src/app/core/**`：**纯 TS，零 electron 依赖**。依赖注入用接口（`HostApp`、`IpcTransport`、`WindowHost`、`Logger`），builder/DesktopApp/单测/集成测试全部在这一层。
-- `src/app/**`（core 之外）：electron 适配与业务。`electron-host.ts`、`electron-transport.ts`、`logging.ts`、`windows/` 是仅有的 import electron 的基础设施。
+`main/core/ports/` 与 `main/electron/` 是一对镜像目录：**ports 是 core 拥有的接缝接口（一侧是框架、一侧是外部世界），electron/ 的每个文件实现一个端口**。端口清单与实现一一对应：
+
+| 端口（core/ports/） | 实现方 |
+| --- | --- |
+| `host.ts`（HostApp + BeforeQuitEvent） | `electron/host.ts` |
+| `ipc-transport.ts`（IpcTransport + IpcListener + IpcCallInfo） | `electron/ipc-transport.ts` |
+| `window-host.ts`（WindowHost + WindowDefinition）、`event-sink.ts`（EventSink） | `electron/windows-manager.ts` |
+| `logger.ts`（Logger + LogLevel + LogMeta） | `electron/logging.ts`、core 的 MemoryLogger |
+| `event-publisher.ts`（EventPublisher） | core 的 `EventPublisherImpl` |
+| `module.ts`（AppModule + ModuleInitContext，driving port） | `modules/**` |
+| `di.ts`（ServiceToken/ServiceAccessor/DisposableService 等 DI 词汇） | core 的 ServiceContainer |
+| `route-registrar.ts`（RouteRegistrar + HandlerContext + RouteHandler） | core 的 IpcRouter |
+| `env.ts`（AppEnv 数据契约） | core 的 resolveEnv 产出 |
+
+判定口径：**接口存在是为了让 core 之外的某方实现或消费，才是 port**；框架自身实现（Lifecycle、ServiceContainer、IpcRouter、DesktopApp、builder）不是 port，不做每类一接口的抽象（无多实现前景、无仅内部可见的公开方法、同包同版本内 DIP 无收益）。`AppEnv` 作为共享内核数据契约随 ports 存放（适配器与业务共同消费）。
+
+分层规则（保证可测试性的关键，全部由守护测试固化）：
+
+- `main/core/**`：**纯 TS，零 electron 依赖**，相对 import 不逃出 core；`core/ports/**` 只依赖 ports。
+- `main/electron/**`：适配层，对 core 的 import 只允许 `core/ports/**`（端口镜像，依赖方向自证）。
+- `main/modules/**`：对 core 只经 barrel `core/index.ts` 导入；跨模块 import 只允许 `*.service.ts`/`*.module.ts`/`*.tokens.ts`。
+- `main/index.ts`（装配脚本）、`main/windows.ts`（窗口定义，应用声明而非适配器）。
 - `src/main.ts` / `src/preload.ts`：仅有的两个构建入口。
 
 ## 3. 生命周期状态机（`core/lifecycle.ts`）
@@ -197,7 +217,7 @@ frame 来源白名单校验 → 生命周期门禁(ready) → 输入 zod 校验
 
 ## 7. 模块协议、角色与命名（`core/module.ts`）
 
-业务特性以模块接入：`{ id, services?, registerRoutes?, init? }`。装配脚本（`app/index.ts`）只做声明，框架在 `run()` 中按固定时序调用：注册服务 → 注册路由 → 模块 init → 路由上线 → `ready` → 开窗。示例模块 `system`（纯路由：0 个服务）与 `settings`（服务 + 路由 + init）。
+业务特性以模块接入：`{ id, services?, registerRoutes?, init? }`。装配脚本（`main/index.ts`）只做声明，框架在 `run()` 中按固定时序调用：注册服务 → 注册路由 → 模块 init → 路由上线 → `ready` → 开窗。示例模块 `system`（纯路由：0 个服务）与 `settings`（服务 + 路由 + init）。
 
 ### 7.1 角色词汇表
 
@@ -216,7 +236,7 @@ frame 来源白名单校验 → 生命周期门禁(ready) → 输入 zod 校验
 
 1. **token id 即边界**：`core.*`（集中定义于 `core/tokens.ts`）/ `modules.<mod>.*`（定义在模块内）。
 2. **类名**：业务服务 = 接口 `XxxService` + 实现 `XxxServiceImpl`（见 §4.4）；核心部件用角色名（Manager/Router/Publisher/Logger），不带 Service 后缀。
-3. **目录即分层**：`core/` 只依赖 core；`modules/` 只依赖 contracts 与 core 接口/token；electron 只出现在既定适配文件与 `dialog`/`BrowserWindow` 直接使用处。
+3. **目录即分层（六边形）**：`core/ports` 只依赖 ports；`core/` 不逃逸且零 electron；`electron/` 只 import ports；`modules/` 对 core 只经 barrel 且跨模块 import 只认 `*.service.ts`/`*.module.ts`/`*.tokens.ts`；electron 直接使用仅限适配目录与模块内 `dialog`/`BrowserWindow`。
    以上三条由 `test/architecture.test.ts` 静态扫描固化（改结构先跑它）。
 
 ### 7.3 模块目录即封装边界
@@ -252,8 +272,8 @@ dispose（唯一回收点）      关停 joiner 触发 container.dispose()
 ## 9. 添加新业务模块（操作清单）
 
 1. **契约**：`packages/contracts/src/schemas.ts` 加 schema，`contract.ts` 加 `procedure('mod.action', In, Out)`（channel 唯一性有单测兜底）；事件加进 `appEvents`。
-2. **模块**：`apps/desktop/src/app/modules/mod/` 新建 `mod.service.ts`（接口 + token + `XxxServiceImpl`，见 §4.4）与 `mod.module.ts`（routes + init）；私有协作者放同目录独立文件（见 §7.3）。
-3. **装配**：`app/index.ts` 装配脚本 `.use(modModule)` 加一行（新窗口同理 `.window(...)`）。
+2. **模块**：`apps/desktop/src/main/modules/mod/` 新建 `mod.service.ts`（接口 + token + `XxxServiceImpl`，见 §4.4）与 `mod.module.ts`（routes + init）；私有协作者放同目录独立文件（见 §7.3）。
+3. **装配**：`main/index.ts` 装配脚本 `.use(modModule)` 加一行（新窗口同理 `.window(...)`）。
 4. **前端**：web 侧 `client.invoke(contract.mod.action, input)` / `client.on(appEvents.modChanged, cb)`。
 5. **测试**：服务单测（注入 MemoryLogger + 内存 sink + tmpdir），路由行为已由 router 测试覆盖通用管线；涉及启动/关停时序的改动补 `desktop-app.integration.test.ts` 断言。
 

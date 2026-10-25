@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { procedure, RpcError } from '@desktop-frame/contracts';
-import { ServiceContainer } from '../src/app/core/container';
-import type { AppEnv } from '../src/app/core/env';
-import { EventPublisher } from '../src/app/core/ipc/events';
-import { IpcRouter } from '../src/app/core/ipc/router';
-import type { IpcListener, IpcTransport } from '../src/app/core/ipc/router';
-import { Lifecycle } from '../src/app/core/lifecycle';
-import { MemoryLogger } from '../src/app/core/logging';
+import { ServiceContainer } from '../src/main/core/container';
+import type { AppEnv } from '../src/main/core/ports/env';
+import { EventPublisherImpl } from '../src/main/core/ipc/events';
+import { IpcRouter } from '../src/main/core/ipc/router';
+import type { IpcListener, IpcTransport } from '../src/main/core/ports/ipc-transport';
+import { Lifecycle } from '../src/main/core/lifecycle';
+import { MemoryLogger } from '../src/main/core/logging';
 
 /** 测试用 echo procedure。 */
 const echo = procedure(
@@ -69,7 +69,7 @@ function createFixture(): Fixture {
             this.sent.push({ channel, payload });
         },
     };
-    const events = new EventPublisher(sink, logger);
+    const events = new EventPublisherImpl(sink, logger);
     const router = new IpcRouter({
         services: container,
         lifecycle,
@@ -192,7 +192,6 @@ describe('IpcRouter', () => {
             seen.push(ctx.sender.frameUrl);
             expect(ctx.services).toBeDefined();
             expect(ctx.events).toBeDefined();
-            expect(ctx.state).toBe('ready');
             return { message: input.message };
         });
         fx.router.install(fx.transport);
@@ -220,7 +219,7 @@ describe('EventPublisher', () => {
                 this.sent.push({ channel, payload });
             },
         };
-        const events = new EventPublisher(sink, logger);
+        const events = new EventPublisherImpl(sink, logger);
 
         events.publish(echoAsEvent(), { message: 'ok' });
         expect(sink.sent).toEqual([{ channel: 't.echo', payload: { message: 'ok' } }]);

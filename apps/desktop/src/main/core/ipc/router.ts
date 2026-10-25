@@ -1,62 +1,17 @@
-import type {
-    Procedure,
-    ProcedureInput,
-    ProcedureOutput,
-    RpcResult,
-} from '@desktop-frame/contracts';
+import type { Procedure, RpcResult } from '@desktop-frame/contracts';
 import { RpcError, err, ok } from '@desktop-frame/contracts';
 import type { z } from 'zod';
-import type { AppEnv } from '../env';
-import type { ServiceAccessor } from '../container';
-import type { LifecycleState, Lifecycle } from '../lifecycle';
-import type { Logger } from '../logging';
-import type { EventPublisher } from './events';
-
-/** 一次调用中关于调用方 renderer 的信息。 */
-export interface IpcCallInfo {
-    /** 调用方 webContents 的 id。 */
-    webContentsId: number;
-    /** 调用方 frame 的 URL（来源白名单校验依据）。 */
-    frameUrl: string;
-}
-
-/** transport 调用的 listener；必须以信封 resolve、永不 reject。 */
-export type IpcListener = (
-    payload: unknown,
-    info: IpcCallInfo,
-) => Promise<RpcResult<unknown>>;
-
-/** 与 electron ipcMain 解耦的传输接口（单测可替换）。 */
-export interface IpcTransport {
-    /** 为 channel 注册 listener。 */
-    handle(channel: string, listener: IpcListener): void;
-}
-
-/** 每次 IPC 调用构造的 handler 上下文（Depends 的对应物）。 */
-export interface HandlerContext {
-    /** 带 channel 标签的子 logger。 */
-    readonly log: Logger;
-    /** 服务获取器。 */
-    readonly services: ServiceAccessor;
-    /** 事件发布器。 */
-    readonly events: EventPublisher;
-    /** 调用方信息。 */
-    readonly sender: IpcCallInfo;
-    /** 调用时刻的生命周期状态。 */
-    readonly state: LifecycleState;
-}
-
-/** procedure 的 handler：接收上下文与已校验的输入。 */
-export type RouteHandler<P extends Procedure> = (
-    ctx: HandlerContext,
-    input: ProcedureInput<P>,
-) => Promise<ProcedureOutput<P>> | ProcedureOutput<P>;
-
-/** 路由注册器（模块通过它注册端点）。 */
-export interface RouteRegistrar {
-    /** 注册一个 procedure 的 handler；channel 重复会抛错。 */
-    handle<P extends Procedure>(proc: P, handler: RouteHandler<P>): void;
-}
+import type { AppEnv } from '../ports/env';
+import type { Lifecycle } from '../lifecycle';
+import type { ServiceAccessor } from '../ports/di';
+import type { EventPublisher } from '../ports/event-publisher';
+import type {
+    HandlerContext,
+    RouteHandler,
+    RouteRegistrar,
+} from '../ports/route-registrar';
+import type { IpcCallInfo, IpcTransport } from '../ports/ipc-transport';
+import type { Logger } from '../ports/logger';
 
 /** 路由构造选项。 */
 export interface RouterOptions {
@@ -147,9 +102,12 @@ export class IpcRouter implements RouteRegistrar {
                 return err('FORBIDDEN', 'calling frame is not allowed to invoke IPC');
             }
 
-            const state = this.options.lifecycle.state;
-            if (state !== 'ready') {
-                return err('UNAVAILABLE', `backend is not ready (state: ${state})`);
+            // 门禁保证 handler 执行时恒为 ready（HandlerContext 因此无需携带 state）。
+            if (this.options.lifecycle.state !== 'ready') {
+                return err(
+                    'UNAVAILABLE',
+                    `backend is not ready (state: ${this.options.lifecycle.state})`,
+                );
             }
 
             const parsedInput = route.proc.input.safeParse(payload);
@@ -164,7 +122,6 @@ export class IpcRouter implements RouteRegistrar {
                 services: this.options.services,
                 events: this.options.events,
                 sender: info,
-                state,
             };
             const rawOutput = await route.handler(ctx, parsedInput.data as never);
 

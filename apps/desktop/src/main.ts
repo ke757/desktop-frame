@@ -1,7 +1,7 @@
 import { app } from 'electron';
 import started from 'electron-squirrel-startup';
-import { buildDesktopApp } from './app';
-import type { Logger } from './app/core/logging';
+import { buildDesktopApp } from './main/index';
+import type { Logger } from './main/core/ports/logger';
 
 // 进程壳：所有进程级策略集中于此（对齐 Tauri main.rs 的 .expect 位置）。
 // ① Windows Squirrel 安装/卸载引导：立即退出，不启动应用。

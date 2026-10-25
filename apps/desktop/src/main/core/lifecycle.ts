@@ -1,4 +1,4 @@
-import type { Logger } from './logging';
+import type { Logger } from './ports/logger';
 
 /**
  * 后端的显式生命周期状态机。

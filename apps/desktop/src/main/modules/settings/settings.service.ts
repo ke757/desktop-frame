@@ -6,14 +6,15 @@ import {
     type SettingsFile,
     type SettingsPatch,
 } from '@desktop-frame/contracts';
+import type { EventPublisher, Logger } from '../../core';
 import {
     defineService,
+    envToken,
+    eventsToken,
+    loggerToken,
     serviceToken,
     type DisposableService,
-} from '../../core/container';
-import type { EventPublisher } from '../../core/ipc/events';
-import type { Logger } from '../../core/logging';
-import { envToken, eventsToken, loggerToken } from '../../core/tokens';
+} from '../../core';
 
 /** 防抖落盘间隔（ms）。 */
 const FLUSH_DEBOUNCE_MS = 500;

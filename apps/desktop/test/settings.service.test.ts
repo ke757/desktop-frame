@@ -2,9 +2,9 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { EventPublisher } from '../src/app/core/ipc/events';
-import { MemoryLogger } from '../src/app/core/logging';
-import { SettingsServiceImpl } from '../src/app/modules/settings/settings.service';
+import { EventPublisherImpl } from '../src/main/core/ipc/events';
+import { MemoryLogger } from '../src/main/core/logging';
+import { SettingsServiceImpl } from '../src/main/modules/settings/settings.service';
 
 /** 每个用例创建的临时目录，结束后统一清理。 */
 let dirs: string[] = [];
@@ -25,7 +25,7 @@ afterEach(async () => {
 function createService(filePath: string) {
     const logger = new MemoryLogger();
     const sink = { sent: [] as unknown[] };
-    const events = new EventPublisher(
+    const events = new EventPublisherImpl(
         {
             send: (_channel: string, payload: unknown) => {
                 sink.sent.push(payload);

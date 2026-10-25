@@ -1,5 +1,5 @@
 import { contract } from '@desktop-frame/contracts';
-import type { AppModule } from '../../core/module';
+import type { AppModule } from '../../core';
 import { settingsService, settingsToken } from './settings.service';
 
 /**

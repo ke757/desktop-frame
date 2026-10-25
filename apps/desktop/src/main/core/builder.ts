@@ -1,15 +1,15 @@
 import { defineService } from './container';
 import { ServiceContainer } from './container';
 import { resolveEnv } from './env';
-import type { AppEnv } from './env';
-import type { HostApp } from './host';
-import { EventPublisher } from './ipc/events';
+import type { AppEnv } from './ports/env';
+import type { HostApp } from './ports/host';
+import { EventPublisherImpl } from './ipc/events';
 import { IpcRouter } from './ipc/router';
-import type { IpcTransport } from './ipc/router';
+import type { IpcTransport } from './ports/ipc-transport';
 import { Lifecycle } from './lifecycle';
-import type { Logger } from './logging';
+import type { Logger } from './ports/logger';
 import { createConsoleLogger } from './logging';
-import type { AppModule } from './module';
+import type { AppModule } from './ports/module';
 import { DesktopApp } from './desktop-app';
 import {
     envToken,
@@ -19,7 +19,7 @@ import {
     loggerToken,
     windowsToken,
 } from './tokens';
-import type { WindowDefinition, WindowHost } from './window';
+import type { WindowDefinition, WindowHost } from './ports/window-host';
 
 /** desktopApp() 的注入点：全部为接口/工厂，保证 builder 零 electron 依赖。 */
 export interface DesktopAppOptions {
@@ -84,7 +84,7 @@ export class DesktopAppBuilder {
         for (const definition of this.windowDefinitions) {
             windows.register(definition);
         }
-        const events = new EventPublisher(windows, logger.child('events'));
+        const events = new EventPublisherImpl(windows, logger.child('events'));
         const router = new IpcRouter({
             services: container,
             lifecycle,
