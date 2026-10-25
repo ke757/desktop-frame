@@ -8,7 +8,7 @@ import { RpcError, err, ok } from '@desktop-frame/contracts';
 import type { z } from 'zod';
 import type { AppEnv } from '../env';
 import type { ServiceAccessor } from '../container';
-import type { LifecycleState, LifecycleService } from '../lifecycle';
+import type { LifecycleState, Lifecycle } from '../lifecycle';
 import type { Logger } from '../logging';
 import type { EventPublisher } from './events';
 
@@ -63,7 +63,7 @@ export interface RouterOptions {
     /** 服务获取器（构造 per-call ctx 用）。 */
     readonly services: ServiceAccessor;
     /** 生命周期状态机（调用门禁）。 */
-    readonly lifecycle: LifecycleService;
+    readonly lifecycle: Lifecycle;
     /** 环境信息（frame 来源白名单）。 */
     readonly env: AppEnv;
     /** 根 logger。 */

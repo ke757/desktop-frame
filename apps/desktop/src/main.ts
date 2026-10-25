@@ -15,8 +15,7 @@ if (started) {
 } else {
     const desktopApp = buildDesktopApp();
     installProcessErrorHandlers(desktopApp.logger);
-    desktopApp.run()
-    .catch((cause) => {
+    desktopApp.run().catch((cause) => {
         desktopApp.logger.error('fatal: application run failed', { error: cause });
         process.exit(1);
     });

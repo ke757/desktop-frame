@@ -6,7 +6,7 @@ import type { HostApp } from './host';
 import { EventPublisher } from './ipc/events';
 import { IpcRouter } from './ipc/router';
 import type { IpcTransport } from './ipc/router';
-import { LifecycleService } from './lifecycle';
+import { Lifecycle } from './lifecycle';
 import type { Logger } from './logging';
 import { createConsoleLogger } from './logging';
 import type { AppModule } from './module';
@@ -75,7 +75,7 @@ export class DesktopAppBuilder {
         // ---- 框架接线（固定顺序，依赖为 DAG，靠构造注入 + 接口倒置）----
         const logger = (this.options.createLogger ?? createConsoleLogger)();
         const env = resolveEnv(host, mainDir);
-        const lifecycle = new LifecycleService(logger.child('lifecycle'));
+        const lifecycle = new Lifecycle(logger.child('lifecycle'));
         const container = new ServiceContainer(logger.child('container'));
         const windows = this.options.createWindows({
             env,

@@ -3,10 +3,10 @@ import type { DesktopApp } from './core/desktop-app';
 import { createElectronHost } from './electron-host';
 import { createElectronIpcTransport } from './electron-transport';
 import { createAppLogger } from './logging';
-import { settingsModule } from './modules/settings/settings.module';
-import { systemModule } from './modules/system/system.module';
 import { WindowManager } from './windows/manager';
 import { createMainWindowDefinition } from './windows/definitions';
+import { settingsModule } from './modules/settings/settings.module';
+import { systemModule } from './modules/system/system.module';
 
 /**
  * 装配脚本（composition script）：全仓库唯一声明"这个应用由什么组成"的

@@ -2,7 +2,7 @@ import { serviceToken } from './container';
 import type { EventPublisher } from './ipc/events';
 import type { AppEnv } from './env';
 import type { HostApp } from './host';
-import type { LifecycleService } from './lifecycle';
+import type { Lifecycle } from './lifecycle';
 import type { Logger } from './logging';
 import type { WindowHost } from './window';
 
@@ -19,7 +19,7 @@ export const envToken = serviceToken<AppEnv>('core.env');
 /** 根 logger。 */
 export const loggerToken = serviceToken<Logger>('core.logger');
 /** 生命周期状态机。 */
-export const lifecycleToken = serviceToken<LifecycleService>('core.lifecycle');
+export const lifecycleToken = serviceToken<Lifecycle>('core.lifecycle');
 /** main→renderer 事件发布器。 */
 export const eventsToken = serviceToken<EventPublisher>('core.events');
 /** 窗口宿主（Electron 下为 WindowManager）。 */

@@ -5,7 +5,7 @@ import type { HostApp } from './host';
 import type { EventPublisher } from './ipc/events';
 import type { IpcRouter } from './ipc/router';
 import type { IpcTransport } from './ipc/router';
-import type { LifecycleService } from './lifecycle';
+import type { Lifecycle } from './lifecycle';
 import type { Logger } from './logging';
 import type { AppModule } from './module';
 import type { WindowHost } from './window';
@@ -19,7 +19,7 @@ export interface DesktopAppParts {
     /** 根 logger。 */
     readonly logger: Logger;
     /** 生命周期状态机。 */
-    readonly lifecycle: LifecycleService;
+    readonly lifecycle: Lifecycle;
     /** 服务容器（核心 token 已注册）。 */
     readonly container: ServiceContainer;
     /** IPC 路由。 */
@@ -59,7 +59,7 @@ export class DesktopApp {
     /** 根 logger。 */
     readonly logger: Logger;
     /** 生命周期状态机（readonly 暴露供测试等待/断言）。 */
-    readonly lifecycle: LifecycleService;
+    readonly lifecycle: Lifecycle;
     /** 服务容器（readonly 暴露供测试断言注册表）。 */
     readonly container: ServiceContainer;
     /** IPC 路由。 */
@@ -72,6 +72,7 @@ export class DesktopApp {
     private readonly transport: IpcTransport;
     private readonly modules: ReadonlyArray<AppModule>;
     private readonly primaryWindowId: string | undefined;
+
     /** 已进入关停流程的标志（防止 before-quit 二次触发）。 */
     private quitting = false;
     /** run() 是否已调用过。 */

@@ -6,7 +6,11 @@ import {
     type SettingsFile,
     type SettingsPatch,
 } from '@desktop-frame/contracts';
-import { defineService, serviceToken } from '../../core/container';
+import {
+    defineService,
+    serviceToken,
+    type DisposableService,
+} from '../../core/container';
 import type { EventPublisher } from '../../core/ipc/events';
 import type { Logger } from '../../core/logging';
 import { envToken, eventsToken, loggerToken } from '../../core/tokens';
@@ -14,14 +18,28 @@ import { envToken, eventsToken, loggerToken } from '../../core/tokens';
 /** 防抖落盘间隔（ms）。 */
 const FLUSH_DEBOUNCE_MS = 500;
 
-/** 设置服务的服务 token。 */
+/**
+ * 设置服务的**公开接口**：token 的类型参数，即模块外允许调用的全部
+ * 方法。生命周期方法（load/flush/dispose）刻意不在其中——dispose 是
+ * 框架钩子（DisposableService），只由容器在关停时调用。
+ */
+export interface SettingsService {
+    /** 读取当前完整设置（schema 默认值已填充）。 */
+    get(): SettingsFile;
+    /** 合并补丁、广播变更事件并安排防抖落盘；返回更新后的完整设置。 */
+    update(patch: SettingsPatch): SettingsFile;
+}
+
+/** 设置服务的服务 token（类型即公开接口）。 */
 export const settingsToken = serviceToken<SettingsService>('modules.settings');
 
 /**
- * app 级设置服务：类型化 JSON 持久化 + 防抖原子写 + dispose 兜底落盘——
- * 一个同时具有异步启动（load）与关停（flush）工作的服务的标准范例。
+ * 设置服务实现：类型化 JSON 持久化 + 防抖原子写 + dispose 兜底落盘——
+ * 一个同时具有异步启动（load）与关停（flush/dispose）工作的服务的标准
+ * 范例。实现细节对模块外不可见（跨模块只允许 import *.service.ts 中
+ * 的接口与 token）。
  */
-export class SettingsService {
+export class SettingsServiceImpl implements SettingsService, DisposableService {
     private data: SettingsFile = SettingsFileSchema.parse({});
     private dirty = false;
     private flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -78,7 +96,7 @@ export class SettingsService {
         await rename(tmp, this.filePath);
     }
 
-    /** 取消挂起的防抖并立即落盘（容器关停时调用）。 */
+    /** 框架钩子（DisposableService）：取消挂起的防抖并立即落盘。 */
     async dispose(): Promise<void> {
         if (this.flushTimer) clearTimeout(this.flushTimer);
         this.flushTimer = undefined;
@@ -103,11 +121,11 @@ export const settingsService = defineService(settingsToken, async (accessor) => 
     const env = await accessor.get(envToken);
     const logger = await accessor.get(loggerToken);
     const events = await accessor.get(eventsToken);
-    const service = new SettingsService(
+    const impl = new SettingsServiceImpl(
         path.join(env.userDataPath, 'settings.json'),
         logger.child('settings'),
         events,
     );
-    await service.load();
-    return service;
+    await impl.load();
+    return impl;
 });

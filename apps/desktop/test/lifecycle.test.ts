@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-import { LifecycleService } from '../src/app/core/lifecycle';
+import { Lifecycle } from '../src/app/core/lifecycle';
 import { MemoryLogger } from '../src/app/core/logging';
 
-describe('LifecycleService', () => {
+describe('Lifecycle', () => {
     it('初始状态为 initializing', () => {
-        expect(new LifecycleService().state).toBe('initializing');
+        expect(new Lifecycle().state).toBe('initializing');
     });
 
     it('只进迁移并通知监听器', () => {
-        const lifecycle = new LifecycleService();
+        const lifecycle = new Lifecycle();
         const changes: string[] = [];
         lifecycle.onChange((change) => changes.push(`${change.from}->${change.to}`));
 
@@ -18,13 +18,13 @@ describe('LifecycleService', () => {
     });
 
     it('拒绝回退迁移', () => {
-        const lifecycle = new LifecycleService();
+        const lifecycle = new Lifecycle();
         lifecycle.transition('ready');
         expect(() => lifecycle.transition('initializing')).toThrow(/backwards/);
     });
 
     it('置同态为 no-op', () => {
-        const lifecycle = new LifecycleService();
+        const lifecycle = new Lifecycle();
         const listener = vi.fn();
         lifecycle.onChange(listener);
         lifecycle.transition('ready');
@@ -33,7 +33,7 @@ describe('LifecycleService', () => {
     });
 
     it('when() 对已达状态立即 resolve、未达状态延后 resolve', async () => {
-        const lifecycle = new LifecycleService();
+        const lifecycle = new Lifecycle();
         await expect(lifecycle.when('initializing')).resolves.toBeUndefined();
 
         let resolved = false;
@@ -47,7 +47,7 @@ describe('LifecycleService', () => {
     });
 
     it('shutdown joiner 按注册顺序串行执行', async () => {
-        const lifecycle = new LifecycleService();
+        const lifecycle = new Lifecycle();
         const order: string[] = [];
         lifecycle.onShutdown(async () => {
             await new Promise((resolve) => setTimeout(resolve, 5));
@@ -64,7 +64,7 @@ describe('LifecycleService', () => {
 
     it('单个 joiner 失败不中断管线', async () => {
         const logger = new MemoryLogger();
-        const lifecycle = new LifecycleService(logger);
+        const lifecycle = new Lifecycle(logger);
         lifecycle.onShutdown(() => {
             throw new Error('joiner boom');
         });
@@ -82,14 +82,14 @@ describe('LifecycleService', () => {
     });
 
     it('shutdown 幂等且忽略迟到的 joiner', async () => {
-        const lifecycle = new LifecycleService();
+        const lifecycle = new Lifecycle();
         const first = vi.fn();
         lifecycle.onShutdown(first);
         await lifecycle.shutdown();
         await lifecycle.shutdown();
 
         const logger = new MemoryLogger();
-        const late = new LifecycleService(logger);
+        const late = new Lifecycle(logger);
         await late.shutdown();
         late.onShutdown(() => {
             throw new Error('should never run');

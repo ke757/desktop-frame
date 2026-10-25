@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { EventPublisher } from '../src/app/core/ipc/events';
 import { MemoryLogger } from '../src/app/core/logging';
-import { SettingsService } from '../src/app/modules/settings/settings.service';
+import { SettingsServiceImpl } from '../src/app/modules/settings/settings.service';
 
 /** 每个用例创建的临时目录，结束后统一清理。 */
 let dirs: string[] = [];
@@ -33,7 +33,7 @@ function createService(filePath: string) {
         },
         logger,
     );
-    return { service: new SettingsService(filePath, logger, events), sink };
+    return { service: new SettingsServiceImpl(filePath, logger, events), sink };
 }
 
 describe('SettingsService', () => {

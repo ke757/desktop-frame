@@ -30,7 +30,7 @@
 │  │ IpcRouter ──→ HandlerContext（每次调用）──→ 业务 handler    │ │
 │  │      │                    │                              │ │
 │  │      │            ServiceContainer（app 级单例，逆序 dispose）│ │
-│  │      │            LifecycleService（状态机 + shutdown joiner）│ │
+│  │      │            Lifecycle（状态机 + shutdown joiner）│ │
 │  │      └──→ EventPublisher ──→ WindowManager（webContents.send）│ │
 │  └─────────────────────────────────────────────────────────── │
 └──────────────────────────────────────────────────────────────┘
@@ -130,6 +130,28 @@ registrar.handle(contract.settings.getAll, async (ctx) => {
 // 3) 框架层（builder/DesktopApp 直接持有核心对象引用，无需容器）
 ```
 
+### 4.4 接口化 token：公开面与框架钩子分离
+
+暴露给模块外部的服务**必须接口化**，规则是"两个受众、两个接口"：
+
+```ts
+/** 公开接口：token 的类型参数 = 外部允许调用的全部方法。 */
+export interface SettingsService {
+    get(): SettingsFile;
+    update(patch: SettingsPatch): SettingsFile;
+}
+export const settingsToken = serviceToken<SettingsService>('modules.settings');
+
+/** 实现：生命周期方法（load/flush/dispose）不在公开接口里。 */
+export class SettingsServiceImpl implements SettingsService, DisposableService { ... }
+```
+
+- **公开接口**（token 类型）：外部消费方经 `get(settingsToken)` 只看到 `get/update`，类型即文档；测试替身只需实现窄接口。
+- **框架钩子**（`DisposableService.dispose`）：受众是容器，**独占调用**。dispose 刻意不进公开接口——否则任何 handler 都能把别人的服务释放掉。
+- 实现类缺省命名 `XxxServiceImpl`（实现有更贴切的角色名时可用，如 `JsonFileStore`）；模块内部独享、不经 token 暴露的服务可省略接口。
+
+**不做 FastAPI Depends 式自动注入**（刻意决策）：自动签名分析需要装饰器/reflect-metadata（VS Code 为此自写 TS transform），换来的是魔法反射与更差的报错，省去的只是一行 `acc.get()`；我们的服务是单次组合的 app 级单例，factory + accessor 就是组合语言（且 `CyclicDependencyError` 带完整链路）。FastAPI 使用经验里感到"缺"的其实是作用域（P3 的 `createScope`），不是自动注入。
+
 ## 5. 类型安全 IPC（`core/ipc/` + `packages/contracts`）
 
 ### 5.1 契约（单一事实源）
@@ -173,9 +195,53 @@ frame 来源白名单校验 → 生命周期门禁(ready) → 输入 zod 校验
 - `render-process-gone` 记日志；`closeAll()` 在关停管线中先于服务 dispose 执行。
 - 安全基线：`sandbox: true`、`contextIsolation: true`、`nodeIntegration: false`、`webSecurity: true` 显式声明。
 
-## 7. 模块协议（`core/module.ts`）
+## 7. 模块协议、角色与命名（`core/module.ts`）
 
-业务特性以模块接入：`{ id, services?, registerRoutes?, init? }`。装配脚本（`app/index.ts`）只做声明，框架在 `run()` 中按固定时序调用：注册服务 → 注册路由 → 模块 init → 路由上线 → `ready` → 开窗。示例模块 `system`（窗口关联 dialog、RpcError 演示、编程式退出）与 `settings`（app 级服务：JSON 持久化 + 防抖落盘 + dispose flush + 变更事件）。
+业务特性以模块接入：`{ id, services?, registerRoutes?, init? }`。装配脚本（`app/index.ts`）只做声明，框架在 `run()` 中按固定时序调用：注册服务 → 注册路由 → 模块 init → 路由上线 → `ready` → 开窗。示例模块 `system`（纯路由：0 个服务）与 `settings`（服务 + 路由 + init）。
+
+### 7.1 角色词汇表
+
+| 角色 | 是什么 | 不是什么 | 业界类比 |
+| --- | --- | --- | --- |
+| **Token** | 依赖接缝的命名句柄（id 即分层标记） | 不是依赖本身/实例 | VS Code `createDecorator` 的 id |
+| **Service（业务服务）** | 运行时对象图节点：有状态、可持资源、可 dispose | 不是文件/模块/"大一号的东西" | Nest provider |
+| **核心部件** | 框架器官（Lifecycle/EventPublisher/WindowManager/IpcRouter） | 业务不可增删；build() 同步构造 | VS Code platform 层 |
+| **Module** | **声明期申报单元**（services+routes+init）；运行时"溶解"为 token 与 channel | 没有运行时实例；不是服务容器 | Nest `@Module` |
+| **Handler/Route** | 无状态调用端点（状态放服务） | 不是依赖存放处 | FastAPI 路由函数 |
+| **Contract** | 跨进程接缝（procedure/event + schema） | 不含行为 | tRPC procedure |
+
+三条判断轴：Service vs Module（运行时节点 vs 声明期申报）；Service vs Handler（状态要活过本次调用吗）；业务服务 vs 核心部件（`modules.*` 惰性异步 / `core.*` 内置同步）。
+
+### 7.2 命名约定
+
+1. **token id 即边界**：`core.*`（集中定义于 `core/tokens.ts`）/ `modules.<mod>.*`（定义在模块内）。
+2. **类名**：业务服务 = 接口 `XxxService` + 实现 `XxxServiceImpl`（见 §4.4）；核心部件用角色名（Manager/Router/Publisher/Logger），不带 Service 后缀。
+3. **目录即分层**：`core/` 只依赖 core；`modules/` 只依赖 contracts 与 core 接口/token；electron 只出现在既定适配文件与 `dialog`/`BrowserWindow` 直接使用处。
+   以上三条由 `test/architecture.test.ts` 静态扫描固化（改结构先跑它）。
+
+### 7.3 模块目录即封装边界
+
+```
+modules/project/
+  project.module.ts     # 申报：services + routes + init（模块"封面"）
+  project.service.ts    # 接口 + token + 实现（公开接缝）
+  sqlite-store.ts       # 私有协作者：无 token，跨模块不可见
+```
+
+- **跨模块 import 只允许指向 `*.service.ts` / `*.module.ts` / `*.tokens.ts`**（拿接口与 token）；私有协作者文件被守护测试封死。
+- 跨模块协作只有两条通道：**契约**（contract/appEvents）与 **token**（`ctx.services.get`）。
+- **接缝三问**（何时值得一个 token）：要跨模块共享吗？要在测试里替换吗？要运行时可选/多实现吗？——皆否则私有类直接 `new`（factory 即该服务的私有组合根）。
+- 初始化分界：**factory 内 await** = 服务自给自足的准备（打开自己的资源）；**module.init** = 特性的启动仪式（跨服务 warm-up、发初始事件）。
+
+### 7.4 服务的注册、实例化与回收
+
+```
+register（run 期）        只登记工厂，零实例化
+首次 get（惰性）           构造 + memoize（失败不缓存，可重试）
+dispose（唯一回收点）      关停 joiner 触发 container.dispose()
+```
+
+**唯一回收点是应用关停**：joiner 管线（窗口先销毁、服务后 dispose）按**实例化逆序**调用 `dispose?.()`——依赖方先于被依赖方；单个失败记日志不阻断。没有运行期回收（无引用计数/空闲驱逐），服务与进程同寿命——刻意的简单性。边界情况：未实例化的服务 dispose 时是 no-op；忘写 dispose 只能靠 review（框架无法静态得知谁持资源）；进程被强杀时 joiner 不跑，持久化要按"随时可能死"设计（防抖 + 临时文件 + rename 原子写）。第二类回收（窗口级）由 P3 的 `createScope` 引入：`scope.dispose()` 随窗口关闭整支逆序释放，机制与 app 级完全同构。
 
 ## 8. 开发与打包链路
 
@@ -186,14 +252,14 @@ frame 来源白名单校验 → 生命周期门禁(ready) → 输入 zod 校验
 ## 9. 添加新业务模块（操作清单）
 
 1. **契约**：`packages/contracts/src/schemas.ts` 加 schema，`contract.ts` 加 `procedure('mod.action', In, Out)`（channel 唯一性有单测兜底）；事件加进 `appEvents`。
-2. **模块**：`apps/desktop/src/app/modules/mod/` 新建 `mod.service.ts`（`defineService` + token + `dispose`）与 `mod.module.ts`（routes + init）。
+2. **模块**：`apps/desktop/src/app/modules/mod/` 新建 `mod.service.ts`（接口 + token + `XxxServiceImpl`，见 §4.4）与 `mod.module.ts`（routes + init）；私有协作者放同目录独立文件（见 §7.3）。
 3. **装配**：`app/index.ts` 装配脚本 `.use(modModule)` 加一行（新窗口同理 `.window(...)`）。
 4. **前端**：web 侧 `client.invoke(contract.mod.action, input)` / `client.on(appEvents.modChanged, cb)`。
 5. **测试**：服务单测（注入 MemoryLogger + 内存 sink + tmpdir），路由行为已由 router 测试覆盖通用管线；涉及启动/关停时序的改动补 `desktop-app.integration.test.ts` 断言。
 
 ## 10. 测试策略
 
-42 个测试全部不依赖 Electron：单元层覆盖容器（惰性/memoize/循环依赖/逆序 dispose/失败重试）、生命周期（转换约束/when/joiner 顺序与容错/幂等）、路由（白名单/门禁/双向校验/RpcError/信封）、事件发布（校验丢弃）、settings 服务（持久化往返/损坏文件回退/落盘）；**集成层**（`test/desktop-app.integration.test.ts`）用 FakeHost/FakeTransport/FakeWindowHost 驱动 `desktopApp().build().run()` 跑通 `build 只装配不启动 → ready → IPC 实调 → quit → 关停管线 → exited → run() resolve` 的完整生命周期——等价于 FastAPI TestClient 驱动 lifespan 的体验。electron 相关薄层（host 适配、窗口管理、preload）靠 dev/package 冒烟覆盖。
+三层测试全部不依赖 Electron：**单元层**覆盖容器（惰性/memoize/循环依赖/逆序 dispose/失败重试）、生命周期（转换约束/when/joiner 顺序与容错/幂等）、路由（白名单/门禁/双向校验/RpcError/信封）、事件发布（校验丢弃）、settings 服务（持久化往返/损坏文件回退/落盘）；**集成层**（`test/desktop-app.integration.test.ts`）用 FakeHost/FakeTransport/FakeWindowHost 驱动 `desktopApp().build().run()` 跑通 `build 只装配不启动 → ready → IPC 实调 → quit → 关停管线 → exited → run() resolve` 的完整生命周期——等价于 FastAPI TestClient 驱动 lifespan 的体验；**架构守护层**（`test/architecture.test.ts`）静态扫描 import 图，把 §7.2 的分层约定固化为可执行断言（core 零 electron、core 只依赖 core、modules 不碰适配层、跨模块 import 白名单）。electron 相关薄层（host 适配、窗口管理、preload）靠 dev/package 冒烟覆盖。
 
 ## 11. 安全清单（对照官方 checklist）
 

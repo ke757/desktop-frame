@@ -51,7 +51,10 @@ export interface ServiceRegistration<T> {
     readonly factory: ServiceFactory<T>;
 }
 
-/** 定义一项服务注册。 */
+/**
+ * 定义一项服务注册的函数。
+ * 调用后返回注册项对象。
+ */
 export function defineService<T>(
     token: ServiceToken<T>,
     factory: ServiceFactory<T>,

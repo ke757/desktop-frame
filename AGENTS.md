@@ -28,8 +28,10 @@
 - preload 处于沙箱（Electron 45 无 Buffer/events/timers shim），只能用 `electron` 模块与 Web 标准 API；桥保持通用（string channel），契约变化不改 preload。
 - 跨进程通信一律走 `packages/contracts`：新增端点 = schema + procedure，channel 名必须唯一（有单测）。不要手写 ipcMain.handle/ipcRenderer.send 绕过路由。
 - handler 永不 reject，业务错误用 `throw new RpcError(code, message, data)`。
-- IPC channel 用 `module.action` 命名；事件 channel 用 `app.xxx`。
 - 服务定义用 `defineService(token, factory)`；factory 内需要依赖用 `accessor.get(token)`，避免并行 get 重叠子图（循环检测会误报）。
+- **接口化 token（公开面与框架钩子分离）**：暴露给模块外部的服务必须 `interface XxxService`（token 的类型参数，只列外部可调方法）+ `class XxxServiceImpl implements XxxService, DisposableService`（生命周期方法如 load/flush 在实现上）。`dispose()` 刻意不进公开接口——它是框架钩子，只由容器调用。私有协作者直接 `new` 在 factory 内，不给 token。
+- **模块目录即封装边界**：跨模块 import 只允许指向对方模块的 `*.service.ts` / `*.module.ts` / `*.tokens.ts`（拿接口与 token）；跨模块协作只走契约与 token 两条通道。
+- 分层/边界由 `test/architecture.test.ts` 静态扫描固化（core 零 electron、core 只依赖 core、modules 不碰适配层、跨模块 import 白名单）；改 `src/app` 结构前先跑它，红了是破坏约定而不是测试问题。
 - 有资源的服务的清理写在 `dispose()`，由容器逆序调用；进程级清理（如服务落盘之外的）注册为 `lifecycle.onShutdown(joiner)`，注意 joiner 顺序（窗口先、服务后）。
 
 ## 风格
@@ -37,6 +39,7 @@
 - oxfmt：单引号、行宽 90、缩进为 4字符；oxlint correctness 警告需清零（`pnpm lint`）。
 - 注释用中文；文档（docs/、README）用中文。
 - 接口的属性、方法 and 模块的变量、函数在声明或定义时都要写注释说明主要功能。
+- 命名：业务服务 = 接口 `XxxService` + 实现 `XxxServiceImpl`（token 类型一律是接口）；核心部件用角色名（Manager/Router/Publisher/Logger），不带 Service 后缀；token id 用 `core.*` / `modules.<mod>.*` 命名空间；IPC channel 用 `module.action`、事件 channel 用 `app.xxx`。
 - 测试放各包 `test/` 目录，命名 `*.test.ts`；核心框架改动必须带测试。
 
 ## 边界

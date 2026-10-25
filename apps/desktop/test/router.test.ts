@@ -6,7 +6,7 @@ import type { AppEnv } from '../src/app/core/env';
 import { EventPublisher } from '../src/app/core/ipc/events';
 import { IpcRouter } from '../src/app/core/ipc/router';
 import type { IpcListener, IpcTransport } from '../src/app/core/ipc/router';
-import { LifecycleService } from '../src/app/core/lifecycle';
+import { Lifecycle } from '../src/app/core/lifecycle';
 import { MemoryLogger } from '../src/app/core/logging';
 
 /** 测试用 echo procedure。 */
@@ -52,7 +52,7 @@ class RecordingTransport implements IpcTransport {
 interface Fixture {
     router: IpcRouter;
     transport: RecordingTransport;
-    lifecycle: LifecycleService;
+    lifecycle: Lifecycle;
     container: ServiceContainer;
     sink: { sent: Array<{ channel: string; payload: unknown }> };
     logger: MemoryLogger;
@@ -61,7 +61,7 @@ interface Fixture {
 /** 组装一套路由及其依赖。 */
 function createFixture(): Fixture {
     const logger = new MemoryLogger();
-    const lifecycle = new LifecycleService();
+    const lifecycle = new Lifecycle();
     const container = new ServiceContainer();
     const sink = {
         sent: [] as Array<{ channel: string; payload: unknown }>,
