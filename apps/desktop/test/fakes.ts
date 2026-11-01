@@ -1,13 +1,13 @@
 import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
-import type { AppEnv } from '../src/main/core/ports/env';
+import type { AppEnv } from '../src/main/core';
 import type {
     HostedProcess,
     ProcessExit,
     ProcessHost,
     SpawnOptions,
-} from '../src/main/core';
+} from '../src/main/core/spi/process-host';
 
 /**
  * 部署相关测试的共享替身：假进程宿主（记录 kill/spawn）、最小 AppEnv、
@@ -78,9 +78,11 @@ export class FakeProcessHost implements ProcessHost {
 export function makeEnv(isDev: boolean): AppEnv {
     return {
         isDev,
+        isPackaged: !isDev,
         devServerUrl: isDev ? 'http://localhost:5173' : undefined,
         appName: 'test-app',
         appVersion: '0.0.0-test',
+        appLocale: 'en-US',
         userDataPath: '/tmp/df-test-user-data',
         mainDir: '/tmp/df-test-main',
         preloadPath: '/tmp/df-test-main/preload.cjs',

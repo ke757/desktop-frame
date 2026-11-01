@@ -3,29 +3,46 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { desktopApp } from '../src/main/core/builder';
-import type { HostApp, BeforeQuitEvent } from '../src/main/core/ports/host';
+import { z } from 'zod';
+import { procedure, type RpcResult } from '@desktop-frame/contracts';
+import { desktopApp } from '../src/main/core/kernel/builder';
+import type { BeforeQuitEvent, HostRuntime } from '../src/main/core/spi/host';
 import type {
     IpcTransport,
     IpcListener,
     IpcCallInfo,
-} from '../src/main/core/ports/ipc-transport';
-import type { RpcResult } from '@desktop-frame/contracts';
-import { MemoryLogger } from '../src/main/core/logging';
-import type { WindowDefinition, WindowHost } from '../src/main/core/ports/window-host';
+} from '../src/main/core/spi/ipc-transport';
+import type { WindowController, WindowDefinition } from '../src/main/core/spi/window';
+import { MemoryLogger } from '../src/main/core/kernel/logging';
 import {
     defineService,
-    deploymentsToken,
+    deploymentReadinessToken,
+    DeploymentStartFailedError,
+    InvalidDeploymentError,
     serviceToken,
     type AppModule,
+    type DeploymentChange,
 } from '../src/main/core';
-import { settingsToken } from '../src/main/modules/settings/settings.service';
 import { settingsModule } from '../src/main/modules/settings/settings.module';
 import { deploymentsModule } from '../src/main/modules/deployments/deployments.module';
 import { FakeProcessHost, startHealthServer } from './fakes';
 
-/** HostApp 假实现：isPackaged=true 走 file 入口（跳过 dev server 等待）。 */
-class FakeHost implements HostApp {
+/**
+ * DesktopApp 集成测试：经内核 builder 注入 Fake runtime，只通过公开面
+ * （run/quit/logger/只读 lifecycle）与 IPC 行为验证——不为测试重新开放
+ * 内部控制面。覆盖：build 纯声明校验、run 启动时序、正常退出、部署受众、
+ * 模块 init 失败回滚、required 部署失败回滚。
+ */
+
+/** 测试用 echo procedure（channel 冲突用例也复用它）。 */
+const echo = procedure(
+    't.echo',
+    z.object({ message: z.string() }),
+    z.object({ message: z.string() }),
+);
+
+/** HostRuntime 假实现：isPackaged=true 走 file 入口（跳过 dev server 等待）。 */
+class FakeHost implements HostRuntime {
     readonly isPackaged = true;
     readonly whenReadyPromise: Promise<void>;
     exitCode: number | undefined;
@@ -124,8 +141,8 @@ class FakeTransport implements IpcTransport {
     }
 }
 
-/** WindowHost 假实现：记录调用，不触碰 electron。 */
-class FakeWindowHost implements WindowHost {
+/** WindowController 假实现：记录调用，不触碰 electron。 */
+class FakeWindowController implements WindowController {
     readonly registered: WindowDefinition[] = [];
     readonly opened: string[] = [];
     readonly sent: Array<{ channel: string; payload: unknown }> = [];
@@ -133,6 +150,9 @@ class FakeWindowHost implements WindowHost {
     closeAllCalls = 0;
 
     register(definition: WindowDefinition): void {
+        if (this.registered.some((def) => def.id === definition.id)) {
+            throw new Error(`window definition already registered: ${definition.id}`);
+        }
         this.registered.push(definition);
     }
 
@@ -176,13 +196,14 @@ afterEach(async () => {
     tempDirs = [];
 });
 
-function makeApp(dir: string) {
+/** 一套完整的 Fake 装配（builder 选项 + 全部替身）。 */
+function makeHarness(dir: string, modules: AppModule[] = []) {
     const host = new FakeHost(dir);
-    const windows = new FakeWindowHost();
+    const windows = new FakeWindowController();
     const transport = new FakeTransport();
     const logger = new MemoryLogger();
     const processHost = new FakeProcessHost();
-    const app = desktopApp({
+    const builder = desktopApp({
         host,
         transport,
         mainDir: dir,
@@ -190,54 +211,149 @@ function makeApp(dir: string) {
         createLogger: () => logger,
         processHost,
     })
-        .use(settingsModule)
-        .window({ id: 'main', isPrimary: true, create: () => undefined })
-        .build();
-    return { app, host, windows, transport, logger, processHost };
+        .use(...modules)
+        .window({ id: 'main', isPrimary: true, create: () => undefined });
+    return { builder, host, windows, transport, logger, processHost };
 }
 
-describe('DesktopApp (builder 集成)', () => {
-    it('build() 只装配不启动：核心对象图就绪，模块尚未注册、lifecycle 未动', () => {
-        const { app } = makeApp('/tmp/unused');
+describe('DesktopApp（build 纯声明装配）', () => {
+    it('build() 只装配不启动：无模块 init、transport 未安装、无窗口与进程副作用', async () => {
+        const initCalls: string[] = [];
+        const spyModule: AppModule = {
+            id: 'spy',
+            registerRoutes(registrar) {
+                registrar.handle(echo, () => ({ message: 'x' }));
+            },
+            async init() {
+                initCalls.push('spy');
+            },
+        };
+        const { builder, transport, windows, processHost } = makeHarness('/tmp/unused', [
+            spyModule,
+        ]);
+        const app = builder.build();
+
         expect(app.lifecycle.state).toBe('initializing');
-        // 模块服务/路由在 run() 才装配（build 不产生启动副作用）。
-        expect(app.container.has(settingsToken)).toBe(false);
-        expect(app.router.channels).toHaveLength(0);
+        expect(initCalls).toEqual([]);
+        // 路由声明已在 build 期登记，但 transport（ipcMain 绑定）未安装。
+        expect(transport.listeners.size).toBe(0);
+        expect(windows.opened).toEqual([]);
+        expect(processHost.spawns).toEqual([]);
     });
 
-    it('run() 驱动完整启动：模块装配 -> ready -> 打开主窗口', async () => {
-        const { app, windows, transport } = makeApp(await makeTempDir());
+    it('build() 校验重复模块 id / 服务 token / 部署 id', () => {
+        const token = serviceToken('dup-token');
+        const dupTokenModuleA: AppModule = {
+            id: 'a',
+            services: [defineService(token, () => ({}))],
+        };
+        const dupTokenModuleB: AppModule = {
+            id: 'b',
+            services: [defineService(token, () => ({}))],
+        };
+        const dupIdA: AppModule = { id: 'same' };
+        const dupIdB: AppModule = { id: 'same' };
+        const dupDepA: AppModule = {
+            id: 'dep-a',
+            deployments: [{ id: 'dup-dep', command: 'x', baseUrl: 'http://127.0.0.1:1' }],
+        };
+        const dupDepB: AppModule = {
+            id: 'dep-b',
+            deployments: [{ id: 'dup-dep', command: 'x', baseUrl: 'http://127.0.0.1:1' }],
+        };
+
+        expect(() => makeHarness('/tmp/u1').builder.use(dupIdA, dupIdB).build()).toThrow(
+            /duplicate module id/,
+        );
+        expect(() =>
+            makeHarness('/tmp/u2').builder.use(dupTokenModuleA, dupTokenModuleB).build(),
+        ).toThrow(/already registered/);
+        expect(() =>
+            makeHarness('/tmp/u3').builder.use(dupDepA, dupDepB).build(),
+        ).toThrow(/duplicate deployment id/);
+    });
+
+    it('build() 校验重复窗口 id 与重复 IPC channel', () => {
+        const chanA: AppModule = {
+            id: 'chan-a',
+            registerRoutes(registrar) {
+                registrar.handle(echo, () => ({ message: 'a' }));
+            },
+        };
+        const chanB: AppModule = {
+            id: 'chan-b',
+            registerRoutes(registrar) {
+                registrar.handle(echo, () => ({ message: 'b' }));
+            },
+        };
+        expect(() => makeHarness('/tmp/u4').builder.use(chanA, chanB).build()).toThrow(
+            /already handled/,
+        );
+        expect(() =>
+            makeHarness('/tmp/u5')
+                .builder.window({ id: 'extra', create: () => undefined })
+                .window({ id: 'extra', create: () => undefined })
+                .build(),
+        ).toThrow(/already registered/);
+    });
+
+    it('纯声明冲突先于启动副作用：路由冲突时进程/窗口/transport 均未触碰', () => {
+        const withDeployment: AppModule = {
+            id: 'deploying',
+            deployments: [{ id: 'svc', command: 'x', baseUrl: 'http://127.0.0.1:1' }],
+            registerRoutes(registrar) {
+                registrar.handle(echo, () => ({ message: 'x' }));
+            },
+        };
+        const conflicting: AppModule = {
+            id: 'conflicting',
+            registerRoutes(registrar) {
+                registrar.handle(echo, () => ({ message: 'y' }));
+            },
+        };
+        const { builder, processHost, windows, transport } = makeHarness('/tmp/u6', [
+            withDeployment,
+            conflicting,
+        ]);
+        expect(() => builder.build()).toThrow(/already handled/);
+        // build 是同步纯声明阶段：任何启动副作用都不会发生。
+        expect(processHost.spawns).toEqual([]);
+        expect(windows.opened).toEqual([]);
+        expect(transport.listeners.size).toBe(0);
+    });
+});
+
+describe('DesktopApp（run 启动时序与正常退出）', () => {
+    it('run() 驱动完整启动：模块 init -> 路由上线 -> ready -> 打开主窗口', async () => {
+        const dir = await makeTempDir();
+        const { builder, transport, windows } = makeHarness(dir, [settingsModule]);
+        const app = builder.build();
         const running = app.run();
 
         await app.lifecycle.when('ready');
-        expect(app.router.channels).toContain('settings.getAll');
+        // 路由已上线：通过 transport 直调 settings.getAll 走完整管线。
+        const result = await transport.call('settings.getAll', undefined);
+        expect(result).toMatchObject({
+            ok: true,
+            data: { theme: 'system', launchCount: 1 },
+        });
         expect(windows.opened).toEqual(['main']);
         // 生命周期变化已广播到窗口宿主。
         expect(windows.sent.map((entry) => entry.channel)).toContain(
             'app.lifecycleChanged',
         );
 
-        // 路由已可用：通过 transport 直调 settings.getAll 走完整管线。
-        const result = await transport.call('settings.getAll', undefined);
-        expect(result).toMatchObject({
-            ok: true,
-            data: { theme: 'system', launchCount: 1 },
-        });
-
         await app.quit();
         await running;
     });
 
-    it('quit() 走关停管线：窗口先关、服务后 dispose、run() 在 exited 后 resolve', async () => {
+    it('quit() 走关停管线：窗口先关、服务落盘、host.exit(0)、run() 在 exited 后 resolve', async () => {
         const dir = await makeTempDir();
-        const { app, host, windows } = makeApp(dir);
+        const { builder, host, windows } = makeHarness(dir, [settingsModule]);
+        const app = builder.build();
         const running = app.run();
         await app.lifecycle.when('ready');
 
-        const joinerOrder: string[] = [];
-        app.lifecycle.onShutdown(() => {
-            joinerOrder.push('late-joiner');
-        });
         await app.quit();
 
         expect(app.lifecycle.state).toBe('exited');
@@ -247,13 +363,14 @@ describe('DesktopApp (builder 集成)', () => {
             await readFile(path.join(dir, 'settings.json'), 'utf8'),
         ) as { launchCount: number };
         expect(persisted.launchCount).toBe(1);
-        expect(joinerOrder).toEqual(['late-joiner']);
         expect(host.exitCode).toBe(0);
         await running;
     });
 
     it('host 事件接线：second-instance 聚焦主窗口，activate 无窗重开', async () => {
-        const { app, host, windows } = makeApp(await makeTempDir());
+        const dir = await makeTempDir();
+        const { builder, host, windows } = makeHarness(dir, [settingsModule]);
+        const app = builder.build();
         const running = app.run();
         await app.lifecycle.when('ready');
 
@@ -261,24 +378,61 @@ describe('DesktopApp (builder 集成)', () => {
         expect(windows.focusPrimaryCalls).toBe(1);
 
         host.emitActivate();
-        // FakeWindowHost 的 openPrimaryIfNone 在有窗口时是 no-op。
+        // FakeWindowController 的 openPrimaryIfNone 在有窗口时是 no-op。
         expect(windows.opened).toEqual(['main']);
 
         await app.quit();
         await running;
     });
+
+    it('模块 dispose 拿到与 init 对称的上下文：可解析服务且此刻服务尚未 dispose', async () => {
+        const dir = await makeTempDir();
+        const order: string[] = [];
+        let instance: { dispose(): void } | undefined;
+        const svcToken = serviceToken<{ dispose(): void }>('modules.dispose-demo');
+        const demoModule: AppModule = {
+            id: 'dispose-demo',
+            services: [
+                defineService(svcToken, () => {
+                    const inst = {
+                        dispose: () => {
+                            order.push('service-disposed');
+                        },
+                    };
+                    instance = inst;
+                    return inst;
+                }),
+            ],
+            async init(ctx) {
+                await ctx.services.get(svcToken);
+            },
+            async dispose(ctx) {
+                // 与 init 同形的受限上下文：dispose 内仍可解析服务，且解析
+                // 到的是同一实例（容器尚未释放、服务尚未 dispose）。
+                const svc = await ctx.services.get(svcToken);
+                order.push(
+                    svc === instance ? 'dispose-resolved-same' : 'dispose-resolved-wrong',
+                );
+            },
+        };
+        const { builder } = makeHarness(dir, [demoModule]);
+        const app = builder.build();
+        const running = app.run();
+        await app.lifecycle.when('ready');
+
+        await app.quit();
+        await running;
+        // 关停顺序：模块逆序 dispose（内可解析服务）先于容器服务 dispose。
+        expect(order).toEqual(['dispose-resolved-same', 'service-disposed']);
+    });
 });
 
-describe('DesktopApp (外部部署控制面)', () => {
-    it('部署在模块 init 前拉起；关停时服务 dispose 先于外部进程终止', async () => {
+describe('DesktopApp（外部部署控制面）', () => {
+    it('部署在模块 init 前拉起（readiness 受众可观察）；关停时服务 dispose 先于部署终止', async () => {
         const dir = await makeTempDir();
-        const host = new FakeHost(dir);
-        const windows = new FakeWindowHost();
-        const transport = new FakeTransport();
-        const logger = new MemoryLogger();
-        const processHost = new FakeProcessHost();
-        const order: string[] = [];
         const health = await startHealthServer();
+        const order: string[] = [];
+        const changes: DeploymentChange[] = [];
 
         /** 带可观察 dispose 的演示服务（证明 dispose 先于进程终止）。 */
         const demoToken = serviceToken<{ ping(): string }>('modules.demo');
@@ -301,35 +455,28 @@ describe('DesktopApp (外部部署控制面)', () => {
             services: [demoService],
             async init(ctx) {
                 await ctx.services.get(demoToken);
-                const manager = await ctx.services.get(deploymentsToken);
+                // 模块只能拿到就绪查询受众：观察状态、订阅迁移。
+                const readiness = await ctx.services.get(deploymentReadinessToken);
+                readiness.onChange((change) => {
+                    if (change.status.id !== 'demo-svc') return;
+                    changes.push(change);
+                    if (change.to === 'stopping') order.push('deployment-stopping');
+                });
                 // 部署先于模块 init 拉起：init 观察到的必须是 running。
-                order.push(`init:${manager.getStatus('demo-svc')?.state}`);
+                order.push(`init:${readiness.getStatus('demo-svc')?.state}`);
             },
         };
 
-        const app = desktopApp({
-            host,
-            transport,
-            mainDir: dir,
-            createWindows: () => windows,
-            createLogger: () => logger,
-            processHost,
-        })
-            .use(deploymentsModule)
-            .use(demoModule)
-            .window({ id: 'main', isPrimary: true, create: () => undefined })
-            .build();
-        app.deployments.onChange((change) => {
-            if (change.status.id === 'demo-svc' && change.to === 'stopping') {
-                order.push('deployment-stopping');
-            }
-        });
-
+        const { builder, transport, windows, processHost } = makeHarness(dir, [
+            deploymentsModule,
+            demoModule,
+        ]);
+        const app = builder.build();
         const running = app.run();
         await app.lifecycle.when('ready');
         expect(order).toEqual(['init:running']);
 
-        // 控制面 RPC 面可用（deployments.list 走完整路由管线）。
+        // 控制面管理受众 RPC 可用（deployments.list 走完整路由管线）。
         const result = await transport.call('deployments.list', undefined);
         expect(result).toMatchObject({
             ok: true,
@@ -342,12 +489,180 @@ describe('DesktopApp (外部部署控制面)', () => {
 
         await app.quit();
         await running;
-        expect(app.deployments.getStatus('demo-svc')?.state).toBe('stopped');
         // joiner 顺序：服务 dispose 先于外部进程终止。
         expect(order.indexOf('service-disposed')).toBeLessThan(
             order.indexOf('deployment-stopping'),
         );
+        // 关停结束：托管进程被优雅终止、状态落 stopped。
         expect(processHost.processes[0]?.killSignals).toEqual(['SIGTERM']);
+        const last = changes[changes.length - 1];
+        expect(last?.status.id).toBe('demo-svc');
+        expect(last?.to).toBe('stopped');
         await health.close();
+    });
+
+    it('模块 init 失败触发统一回滚：已 init 模块 dispose、容器回收、run() reject', async () => {
+        const dir = await makeTempDir();
+        const events: string[] = [];
+        const okToken = serviceToken<{ dispose(): void }>('modules.ok');
+        const okModule: AppModule = {
+            id: 'ok',
+            services: [
+                defineService(okToken, () => ({
+                    dispose: () => {
+                        events.push('service-disposed');
+                    },
+                })),
+            ],
+            async init(ctx) {
+                await ctx.services.get(okToken);
+                events.push('ok-init');
+            },
+            dispose() {
+                events.push('ok-module-disposed');
+            },
+        };
+        const failingModule: AppModule = {
+            id: 'failing',
+            async init() {
+                throw new Error('init boom');
+            },
+        };
+        const { builder, host, windows, transport } = makeHarness(dir, [
+            okModule,
+            failingModule,
+        ]);
+        const app = builder.build();
+
+        await expect(app.run()).rejects.toThrow('init boom');
+
+        // 回滚完成：生命周期落 exited（不是 ready），窗口未打开。
+        expect(app.lifecycle.state).toBe('exited');
+        expect(windows.opened).toEqual([]);
+        expect(transport.listeners.size).toBe(0);
+        // 清理顺序：模块逆序 dispose -> 容器内服务 dispose。
+        expect(events).toEqual(['ok-init', 'ok-module-disposed', 'service-disposed']);
+        // 启动失败不以正常退出的 host.exit(0) 收尾，退出码由进程壳决定。
+        expect(host.exitCode).toBeUndefined();
+    });
+
+    it('required 部署启动失败：startAll reject，统一回滚后 run() 以原错误 reject', async () => {
+        const dir = await makeTempDir();
+        const initCalls: string[] = [];
+        const okModule: AppModule = {
+            id: 'ok',
+            async init() {
+                initCalls.push('ok');
+            },
+        };
+        const hardModule: AppModule = {
+            id: 'hard',
+            deployments: [
+                {
+                    id: 'hard-svc',
+                    required: true,
+                    command: 'missing-binary',
+                    baseUrl: 'http://127.0.0.1:1',
+                    health: { intervalMs: 20 },
+                    readyTimeoutMs: 1_000,
+                },
+            ],
+            async init() {
+                initCalls.push('hard');
+            },
+        };
+        const { builder, host, windows, processHost } = makeHarness(dir, [
+            okModule,
+            hardModule,
+        ]);
+        const app = builder.build();
+        processHost.nextSpawnError = 'spawn missing-binary ENOENT';
+
+        await expect(app.run()).rejects.toBeInstanceOf(DeploymentStartFailedError);
+
+        // 回滚完成：部署先于模块 init，因此任何模块 init 都未执行。
+        expect(initCalls).toEqual([]);
+        expect(app.lifecycle.state).toBe('exited');
+        expect(windows.opened).toEqual([]);
+        expect(processHost.spawns).toHaveLength(1);
+        // 不以正常退出的 host.exit(0) 收尾，非零退出码由进程壳决定。
+        expect(host.exitCode).toBeUndefined();
+    });
+
+    it('控制面工厂失败：先于解析注册的关停管线仍清理已实例化依赖', async () => {
+        const dir = await makeTempDir();
+        /** 可观察 dispose 的进程宿主替身（工厂经容器解析它，dispose 归容器管）。 */
+        class DisposableProcessHost extends FakeProcessHost {
+            disposed = false;
+            dispose(): void {
+                this.disposed = true;
+            }
+        }
+        const processHost = new DisposableProcessHost();
+        // 无效 DeploymentSpec：build 只查重复 id（通过），字段校验在控制面
+        // 工厂内进行——工厂解析 processHost 之后才抛 InvalidDeploymentError。
+        const badSpecModule: AppModule = {
+            id: 'bad-spec',
+            deployments: [{ id: 'bad-svc', command: 'x', baseUrl: 'not-a-url' }],
+        };
+        const host = new FakeHost(dir);
+        const windows = new FakeWindowController();
+        const transport = new FakeTransport();
+        const logger = new MemoryLogger();
+        const app = desktopApp({
+            host,
+            transport,
+            mainDir: dir,
+            createWindows: () => windows,
+            createLogger: () => logger,
+            processHost,
+        })
+            .use(badSpecModule)
+            .window({ id: 'main', isPrimary: true, create: () => undefined })
+            .build();
+
+        await expect(app.run()).rejects.toBeInstanceOf(InvalidDeploymentError);
+
+        // 回滚完整：生命周期落 exited、窗口被关停管线销毁。
+        expect(app.lifecycle.state).toBe('exited');
+        expect(windows.closeAllCalls).toBe(1);
+        // 关键回归：joiner 先于控制面解析注册——工厂已实例化的依赖
+        // （processHost）被 container.dispose 回收，不再泄漏。
+        expect(processHost.disposed).toBe(true);
+        // 失败路径不以正常退出的 host.exit(0) 收尾。
+        expect(host.exitCode).toBeUndefined();
+    });
+
+    it('可选部署启动失败不阻断启动：应用照常 ready、IPC 可用', async () => {
+        const dir = await makeTempDir();
+        let observedState: string | undefined;
+        const softModule: AppModule = {
+            id: 'soft',
+            deployments: [
+                {
+                    id: 'soft-svc',
+                    command: 'missing-binary',
+                    baseUrl: 'http://127.0.0.1:1',
+                    health: { intervalMs: 20 },
+                    readyTimeoutMs: 1_000,
+                },
+            ],
+            async init(ctx) {
+                const readiness = await ctx.services.get(deploymentReadinessToken);
+                observedState = readiness.getStatus('soft-svc')?.state;
+            },
+        };
+        const { builder, transport } = makeHarness(dir, [settingsModule, softModule]);
+        const app = builder.build();
+        const running = app.run();
+
+        await app.lifecycle.when('ready');
+        expect(observedState).toBe('failed');
+        // 可选 sidecar 缺席，应用照常可用。
+        const result = await transport.call('settings.getAll', undefined);
+        expect(result).toMatchObject({ ok: true });
+
+        await app.quit();
+        await running;
     });
 });

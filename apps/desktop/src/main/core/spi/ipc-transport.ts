@@ -15,7 +15,7 @@ export type IpcListener = (
 ) => Promise<RpcResult<unknown>>;
 
 /**
- * IPC 传输端口：路由与 electron ipcMain 之间的接缝，
+ * IPC 传输 SPI：路由与 electron ipcMain 之间的接缝，
  * 由 `electron/ipc-transport.ts` 实现；集成测试用 FakeTransport。
  */
 export interface IpcTransport {

@@ -4,12 +4,12 @@ import type {
     ProcessExit,
     ProcessHost,
     SpawnOptions,
-} from '../core/ports/process-host';
+} from '../core/spi/process-host';
 
 /**
- * ProcessHost 端口的 Node 适配（node:child_process）。Electron 主进程本身
+ * ProcessHost SPI 的 Node 适配（node:child_process）。Electron 主进程本身
  * 就是 Node 进程，OS 级适配器与 electron 适配器同居适配层（依赖方向同构：
- * 只 import core/ports）。
+ * 只 import core/spi）。
  */
 
 /** 把流 chunk 切分为完整行（残留尾部在流结束时冲掉）。 */

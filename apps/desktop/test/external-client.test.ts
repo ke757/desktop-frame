@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { DeploymentManagerImpl } from '../src/main/core/deployment/manager';
-import { MemoryLogger } from '../src/main/core/logging';
+import { MemoryLogger } from '../src/main/core/kernel/logging';
 import {
     ExternalServiceError,
     createExternalServiceClient,

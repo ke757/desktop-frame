@@ -1,6 +1,6 @@
 /**
- * DI 端口词汇：服务身份（token）与容器对外契约的纯类型。
- * 实现见 core/container.ts；本文件只允许依赖 ports 内其他文件。
+ * DI 词汇（模块作者公共 API）：服务身份（token）与容器对外契约。
+ * 实现见 core/kernel/container.ts；本文件不依赖任何 core 实现。
  */
 
 /** 服务 token：依赖接缝的命名句柄，`__type` 为幻影类型载体（运行时不存在）。 */
@@ -32,4 +32,17 @@ export interface ServiceRegistration<T> {
     readonly token: ServiceToken<T>;
     /** 服务工厂。 */
     readonly factory: ServiceFactory<T>;
+}
+
+/** 创建一个类型化服务 token。 */
+export function serviceToken<T>(id: string): ServiceToken<T> {
+    return { id };
+}
+
+/** 定义一项服务注册（token + 工厂），由组合根或模块申报。 */
+export function defineService<T>(
+    token: ServiceToken<T>,
+    factory: ServiceFactory<T>,
+): ServiceRegistration<T> {
+    return { token, factory };
 }

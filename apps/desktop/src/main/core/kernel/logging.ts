@@ -1,8 +1,8 @@
 /**
- * Logger 的实现集合：测试用 MemoryLogger、缺省 ConsoleLogger。
- * Logger 接口本体在 ports/logger.ts（应用侧由 electron/logging.ts 实现）。
+ * Logger 的实现集合（内核部件）：测试用 MemoryLogger、缺省 ConsoleLogger。
+ * Logger 接口本体在 api/logger.ts（应用侧由 electron/logging.ts 实现）。
  */
-import type { LogLevel, LogMeta, Logger } from './ports/logger';
+import type { LogLevel, LogMeta, Logger } from '../api/logger';
 
 /** 一条日志记录。 */
 export interface LogEntry {

@@ -1,7 +1,8 @@
-import type { Logger } from './ports/logger';
+import type { LifecycleChange, LifecycleState, LifecycleView } from '../api/lifecycle';
+import type { Logger } from '../api/logger';
 
 /**
- * 后端的显式生命周期状态机。
+ * 后端的显式生命周期状态机（内核部件）。
  *
  * Electron 只提供裸 app 事件；大型应用（参照 VS Code）在其上叠加一层
  * 只进不退的 phase 机器，以便：
@@ -10,10 +11,9 @@ import type { Logger } from './ports/logger';
  * - 子系统（如 IPC 路由）可以基于当前状态做门禁。
  *
  * 状态迁移：initializing -> ready -> shuttingDown -> exited。
+ * 完整状态机由内核独占持有，不通过公开 token 暴露；进程壳与测试只见
+ * 只读视图（LifecycleView，见 api/lifecycle.ts）。
  */
-
-/** 生命周期状态。 */
-export type LifecycleState = 'initializing' | 'ready' | 'shuttingDown' | 'exited';
 
 /** 状态次序表（只进不退）。 */
 const ORDER: Record<LifecycleState, number> = {
@@ -22,14 +22,6 @@ const ORDER: Record<LifecycleState, number> = {
     shuttingDown: 2,
     exited: 3,
 };
-
-/** 一次状态迁移。 */
-export interface LifecycleChange {
-    /** 迁移前状态。 */
-    from: LifecycleState;
-    /** 迁移后状态。 */
-    to: LifecycleState;
-}
 
 /** 关停管线中的清理钩子。 */
 export type ShutdownJoiner = () => void | Promise<void>;
@@ -43,7 +35,7 @@ export class LifecycleError extends Error {
 }
 
 /** 生命周期状态机：状态迁移、变更订阅、关停 joiner 管线。 */
-export class Lifecycle {
+export class Lifecycle implements LifecycleView {
     private currentState: LifecycleState = 'initializing';
     private readonly waiters: Array<{ target: LifecycleState; resolve: () => void }> = [];
     private readonly shutdownJoiners: ShutdownJoiner[] = [];

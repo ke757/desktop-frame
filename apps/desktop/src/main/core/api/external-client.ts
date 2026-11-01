@@ -1,5 +1,5 @@
-import type { DeploymentManager } from '../ports/deployment';
-import type { Logger } from '../ports/logger';
+import type { DeploymentReadiness } from './deployment';
+import type { Logger } from './logger';
 
 /** 外部服务访问错误码。 */
 export type ExternalErrorCode =
@@ -32,7 +32,7 @@ export interface ExternalServiceClient {
     readonly deployment: string;
     /** 服务根地址（生效 spec 的 baseUrl，仅 origin）。 */
     readonly baseUrl: string;
-    /** 等待部署就绪（转发到 DeploymentManager.whenReady）。 */
+    /** 等待部署就绪（转发到 DeploymentReadiness.whenReady）。 */
     whenReady(timeoutMs?: number): Promise<void>;
     /**
      * 发起 HTTP 请求：等待部署就绪后 fetch 指定路径；未就绪/超时/网络
@@ -45,10 +45,10 @@ export interface ExternalServiceClient {
 
 /** 客户端构造选项。 */
 export interface ExternalClientOptions {
-    /** 目标部署 id（须已注册给 DeploymentManager）。 */
+    /** 目标部署 id（须已注册给部署控制面）。 */
     readonly deployment: string;
-    /** 部署控制面（就绪等待与 baseUrl 解析）。 */
-    readonly manager: DeploymentManager;
+    /** 部署控制面的就绪查询受众（客户端只需要 getStatus/whenReady）。 */
+    readonly manager: DeploymentReadiness;
     /** 可选 logger（连接失败诊断用）。 */
     readonly logger?: Logger;
     /** 就绪等待上限（ms；缺省用部署 spec 的 readyTimeoutMs）。 */
@@ -75,7 +75,8 @@ function toWebSocketUrl(baseUrl: string, path: string): string {
 /**
  * 创建外部领域服务的代理客户端。适配层服务（如 modules/search）在工厂内
  * 构造它并持有，业务方法经 `request`/`socket` 与外部服务通信——控制面
- * （DeploymentManager）负责拉起与就绪，数据面（本客户端）只做转发。
+ * 负责拉起与就绪，数据面（本客户端）只做转发。客户端只依赖
+ * DeploymentReadiness 受众，不取得部署管理权限。
  */
 export function createExternalServiceClient(
     options: ExternalClientOptions,

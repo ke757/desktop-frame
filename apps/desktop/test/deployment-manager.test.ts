@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { DeploymentStatusSchema } from '@desktop-frame/contracts';
 import { DeploymentManagerImpl } from '../src/main/core/deployment/manager';
-import { MemoryLogger } from '../src/main/core/logging';
+import { MemoryLogger } from '../src/main/core/kernel/logging';
 import type { DeploymentChange, DeploymentProfile } from '../src/main/core';
 import {
     DeploymentManagerClosedError,
     DeploymentNotReadyError,
+    DeploymentStartFailedError,
     InvalidDeploymentError,
     UnknownDeploymentError,
 } from '../src/main/core';
@@ -293,5 +294,72 @@ describe('DeploymentManager (profile 与校验)', () => {
         await expect(manager.start('demo')).rejects.toBeInstanceOf(
             DeploymentManagerClosedError,
         );
+    });
+});
+
+describe('DeploymentManager (required 启动策略)', () => {
+    it('required 部署启动失败使 startAll reject（硬依赖）', async () => {
+        const { manager, processHost } = makeManager({});
+        processHost.nextSpawnError = 'spawn demo-server ENOENT';
+        manager.register({
+            id: 'hard',
+            required: true,
+            command: 'demo-server',
+            baseUrl: 'http://127.0.0.1:1',
+            readyTimeoutMs: 250,
+            health: { intervalMs: 20 },
+        });
+
+        await expect(manager.startAll()).rejects.toBeInstanceOf(
+            DeploymentStartFailedError,
+        );
+        await expect(manager.startAll()).rejects.toMatchObject({
+            deploymentIds: ['hard'],
+        });
+        expect(manager.getStatus('hard')?.state).toBe('failed');
+    });
+
+    it('可选部署启动失败不 reject（保持 sidecar 可缺席的既有行为）', async () => {
+        const { manager, processHost } = makeManager({});
+        processHost.nextSpawnError = 'spawn demo-server ENOENT';
+        manager.register({
+            id: 'soft',
+            command: 'demo-server',
+            baseUrl: 'http://127.0.0.1:1',
+            readyTimeoutMs: 250,
+            health: { intervalMs: 20 },
+        });
+
+        await expect(manager.startAll()).resolves.toBeUndefined();
+        expect(manager.getStatus('soft')?.state).toBe('failed');
+    });
+
+    it('required 与可选混合：可选失败只记录，required 失败整体 reject 且全部已尝试', async () => {
+        const { manager, processHost } = makeManager({});
+        // 两者都因健康探测超时失败（服务不在场）：可选不抢先 reject，
+        // required 在全部落定后令 startAll 整体失败。
+        manager.register({
+            id: 'soft',
+            command: 'demo-server',
+            baseUrl: 'http://127.0.0.1:1',
+            readyTimeoutMs: 200,
+            health: { intervalMs: 20, timeoutMs: 100 },
+        });
+        manager.register({
+            id: 'hard',
+            required: true,
+            command: 'demo-server',
+            baseUrl: 'http://127.0.0.1:1',
+            readyTimeoutMs: 200,
+            health: { intervalMs: 20, timeoutMs: 100 },
+        });
+
+        const failure = await manager.startAll().catch((cause: unknown) => cause);
+        expect(failure).toBeInstanceOf(DeploymentStartFailedError);
+        // 两个部署都尝试过，只有 required 出现在失败清单。
+        expect((failure as DeploymentStartFailedError).deploymentIds).toEqual(['hard']);
+        expect(manager.getStatus('soft')?.state).toBe('failed');
+        expect(manager.getStatus('hard')?.state).toBe('failed');
+        expect(processHost.spawns).toHaveLength(2);
     });
 });

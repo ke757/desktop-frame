@@ -1,21 +1,22 @@
-import type { AppEnv } from '../ports/env';
-import type { Logger } from '../ports/logger';
-import type { ProcessHost, HostedProcess } from '../ports/process-host';
 import type {
     DeploymentChange,
     DeploymentHealthConfig,
-    DeploymentManager,
     DeploymentProfile,
     DeploymentSpec,
     DeploymentState,
     DeploymentStatus,
-} from '../ports/deployment';
+} from '../api/deployment';
 import {
     DeploymentManagerClosedError,
     DeploymentNotReadyError,
+    DeploymentStartFailedError,
     InvalidDeploymentError,
     UnknownDeploymentError,
-} from '../ports/deployment';
+} from '../api/deployment';
+import type { DeploymentControlPlane } from './controller';
+import type { AppEnv } from '../api/env';
+import type { Logger } from '../api/logger';
+import type { HostedProcess, ProcessHost } from '../spi/process-host';
 
 /** 缺省健康探测路径。 */
 const DEFAULT_HEALTH_PATH = '/health';
@@ -30,7 +31,7 @@ const DEFAULT_STOP_TIMEOUT_MS = 5_000;
 
 /** DeploymentManagerImpl 的构造选项。 */
 export interface DeploymentManagerOptions {
-    /** 进程宿主端口（拉起外部可执行程序的实际通道）。 */
+    /** 进程宿主 SPI（拉起外部可执行程序的实际通道）。 */
     readonly processHost: ProcessHost;
     /** 环境信息（profile 仅在 isDev 时应用）。 */
     readonly env: AppEnv;
@@ -56,7 +57,7 @@ interface DeploymentRuntime {
     proc: HostedProcess | undefined;
     /** external 模式的就绪探测定时器。 */
     probeTimer: NodeJS.Timeout | undefined;
-    /** 输出订阅的退订函数。 */
+    /** 托管进程输出订阅的退订函数（进程退出/重启订阅时清理）。 */
     unsubscribeOutput: (() => void) | undefined;
     /** 停止意图标志（区分「主动停止」与「意外崩溃」）。 */
     stopInitiated: boolean;
@@ -74,7 +75,8 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * 部署控制面实现：外部领域服务（独立可执行程序）的启动/停止编排与状态
- * 跟踪（接口见 ports/deployment.ts）。
+ * 跟踪。controller/readiness/admin 三个受众接口实现于同一对象（接口见
+ * api/deployment.ts 与 controller.ts），状态只有一份。
  *
  * - managed 模式：经 ProcessHost 拉起进程，轮询健康端点直到就绪（超时置
  *   failed 并清理残留进程）；进程意外退出置 crashed；停止走
@@ -82,8 +84,10 @@ function sleep(ms: number): Promise<void> {
  * - external 模式：进程由外部运行（dev 下由用户手动启动），控制面只做
  *   就绪探测（无超时上限，直到服务上线或被停止）。
  * - profile 覆盖仅在 env.isDev 时应用（打包产物恒用模块申报的原始 spec）。
+ * - required 策略：required 部署启动失败使 startAll reject（硬依赖）；
+ *   可选部署失败只记录状态（保持 sidecar 可缺席的既有行为）。
  */
-export class DeploymentManagerImpl implements DeploymentManager {
+export class DeploymentManagerImpl implements DeploymentControlPlane {
     private readonly processHost: ProcessHost;
     private readonly env: AppEnv;
     private readonly logger: Logger;
@@ -99,10 +103,10 @@ export class DeploymentManagerImpl implements DeploymentManager {
         this.profile = options.profile;
     }
 
-    // ---- 框架内部面（DesktopApp 在启动/关停时序中调用）----
+    // ---- 框架内部面（DeploymentController：内核在启动/关停时序中调用）----
 
     /** 注册一个部署声明（应用 profile 覆盖并校验）；重复 id 抛错。 */
-    register(spec: DeploymentSpec): this {
+    register(spec: DeploymentSpec): void {
         if (this.runtimes.has(spec.id)) {
             throw new InvalidDeploymentError(`duplicate deployment id: ${spec.id}`);
         }
@@ -141,25 +145,43 @@ export class DeploymentManagerImpl implements DeploymentManager {
             id: effective.id,
             mode: this.modeOf(effective),
             baseUrl: effective.baseUrl,
+            required: effective.required ?? false,
         });
-        return this;
     }
 
     /**
      * 启动全部已注册部署：managed 并行拉起并等待就绪（或 failed）；
      * external 只挂上探测循环立即返回（dev 语义：等用户手动启动）。
+     * 可选部署失败不阻断其余部署；required 部署失败在全部落定后整体
+     * reject（不无条件吞掉异常，框架据此区分硬依赖失败并回滚启动）。
      */
     async startAll(): Promise<void> {
-        const ids = [...this.runtimes.keys()];
+        const requiredFailures: string[] = [];
         await Promise.all(
-            ids.map(async (id) => {
+            [...this.runtimes.values()].map(async (rt) => {
                 try {
-                    await this.start(id);
+                    await this.start(rt.spec.id);
+                    if (rt.spec.required && this.dead(rt)) {
+                        // start 已解析但状态仍坏（如 health:false 的启动秒退）。
+                        requiredFailures.push(rt.spec.id);
+                        rt.log.error('required deployment failed to start', {
+                            detail: rt.detail,
+                        });
+                    }
                 } catch (cause) {
-                    this.logger.error('deployment failed to start', { id, error: cause });
+                    rt.log.error('deployment failed to start', { error: cause });
+                    if (rt.spec.required) {
+                        requiredFailures.push(rt.spec.id);
+                    }
                 }
             }),
         );
+        if (requiredFailures.length > 0) {
+            throw new DeploymentStartFailedError(
+                `required deployment(s) failed to start: ${requiredFailures.join(', ')}`,
+                requiredFailures,
+            );
+        }
     }
 
     /**
@@ -179,60 +201,12 @@ export class DeploymentManagerImpl implements DeploymentManager {
         );
     }
 
-    // ---- 公开面（DeploymentManager 接口）----
-
-    /** 全部部署的状态快照（按注册顺序）。 */
-    list(): DeploymentStatus[] {
-        return [...this.runtimes.values()].map((rt) => this.snapshot(rt));
-    }
+    // ---- 就绪查询受众（DeploymentReadiness：外部服务客户端用）----
 
     /** 单个部署的状态快照；未知 id 返回 undefined。 */
     getStatus(id: string): DeploymentStatus | undefined {
         const rt = this.runtimes.get(id);
         return rt ? this.snapshot(rt) : undefined;
-    }
-
-    /** 启动部署并返回快照（managed 等待就绪或失败；external 立即返回 waiting）。 */
-    async start(id: string): Promise<DeploymentStatus> {
-        const rt = this.runtimeOf(id);
-        this.assertOpen();
-        rt.stopInitiated = false;
-        this.clearProbe(rt);
-        if (this.modeOf(rt.spec) === 'external') {
-            await this.startExternal(rt);
-        } else {
-            await this.startManaged(rt);
-        }
-        return this.snapshot(rt);
-    }
-
-    /** 停止部署并返回快照（managed 优雅终止；external 撤销探测）。 */
-    async stop(id: string): Promise<DeploymentStatus> {
-        const rt = this.runtimeOf(id);
-        if (rt.state === 'registered' || rt.state === 'stopped') {
-            return this.snapshot(rt);
-        }
-        this.clearProbe(rt);
-        rt.stopInitiated = true;
-        if (!rt.proc) {
-            // external 模式或进程已退出：直接落 stopped。
-            this.setState(rt, 'stopped');
-            return this.snapshot(rt);
-        }
-        this.setState(rt, 'stopping');
-        await this.terminate(rt);
-        this.setState(rt, 'stopped');
-        return this.snapshot(rt);
-    }
-
-    /** 重启部署（停止后重新启动）并返回快照。 */
-    async restart(id: string): Promise<DeploymentStatus> {
-        const rt = this.runtimeOf(id);
-        this.assertOpen();
-        await this.stop(id);
-        rt.stopInitiated = false;
-        await this.start(id);
-        return this.snapshot(rt);
     }
 
     /** 等待部署就绪（running）；终态或超时 reject DeploymentNotReadyError。 */
@@ -291,6 +265,64 @@ export class DeploymentManagerImpl implements DeploymentManager {
         };
     }
 
+    // ---- 管理受众（DeploymentAdmin：deployments 管理模块用）----
+
+    /** 全部部署的状态快照（按注册顺序）。 */
+    list(): DeploymentStatus[] {
+        return [...this.runtimes.values()].map((rt) => this.snapshot(rt));
+    }
+
+    /** 启动部署并返回快照（managed 等待就绪或失败；external 立即返回 waiting）。 */
+    async start(id: string): Promise<DeploymentStatus> {
+        const rt = this.runtimeOf(id);
+        this.assertOpen();
+        rt.stopInitiated = false;
+        this.clearProbe(rt);
+        if (this.modeOf(rt.spec) === 'external') {
+            await this.startExternal(rt);
+        } else {
+            await this.startManaged(rt);
+        }
+        if (this.dead(rt)) {
+            // 托管启动序列结束仍未就绪（spawn 失败/就绪超时）：以错误表达
+            // 失败结果，调用方（startAll/管理端点）能区分成功与失败。
+            throw new DeploymentStartFailedError(
+                `deployment "${id}" failed to start` +
+                    (rt.detail ? `: ${rt.detail}` : ''),
+                [id],
+            );
+        }
+        return this.snapshot(rt);
+    }
+
+    /** 停止部署并返回快照（managed 优雅终止；external 撤销探测）。 */
+    async stop(id: string): Promise<DeploymentStatus> {
+        const rt = this.runtimeOf(id);
+        if (rt.state === 'registered' || rt.state === 'stopped') {
+            return this.snapshot(rt);
+        }
+        this.clearProbe(rt);
+        rt.stopInitiated = true;
+        if (!rt.proc) {
+            // external 模式或进程已退出：直接落 stopped。
+            this.setState(rt, 'stopped');
+            return this.snapshot(rt);
+        }
+        this.setState(rt, 'stopping');
+        await this.terminate(rt);
+        this.setState(rt, 'stopped');
+        return this.snapshot(rt);
+    }
+
+    /** 重启部署（停止后重新启动）并返回快照。 */
+    async restart(id: string): Promise<DeploymentStatus> {
+        const rt = this.runtimeOf(id);
+        this.assertOpen();
+        await this.stop(id);
+        rt.stopInitiated = false;
+        return this.start(id);
+    }
+
     // ---- 内部实现 ----
 
     /** 托管启动：拉起进程 + 健康探测（或 health:false 直接视为就绪）。 */
@@ -316,6 +348,7 @@ export class DeploymentManagerImpl implements DeploymentManager {
         });
         rt.proc = proc;
         rt.pid = proc.pid ?? null;
+        rt.unsubscribeOutput?.();
         rt.unsubscribeOutput = proc.onOutput((stream, line) => {
             if (stream === 'stderr') rt.log.warn('external service output', { line });
             else rt.log.debug('external service output', { line });
@@ -323,6 +356,11 @@ export class DeploymentManagerImpl implements DeploymentManager {
         // 意外退出检测（crash）与启动失败检测（spawn error）。
         void proc.exited.then((exit) => this.handleExit(rt, exit));
         if (spec.health === false) {
+            // health:false 也给启动失败一个确定性的暴露窗口：等进程立即
+            // 退出（spawn 失败/秒退）或一个事件循环 tick，二者先到。
+            await Promise.race([proc.exited.then(() => undefined), sleep(0)]);
+            if (rt.stopInitiated) return;
+            if (this.dead(rt)) return; // start() 统一抛错。
             this.setState(rt, 'running');
             return;
         }
@@ -436,7 +474,7 @@ export class DeploymentManagerImpl implements DeploymentManager {
         }
     }
 
-    /** 清除挂起的探测定时器与输出订阅。 */
+    /** 清除挂起的探测定时器。 */
     private clearProbe(rt: DeploymentRuntime): void {
         if (rt.probeTimer !== undefined) {
             clearTimeout(rt.probeTimer);

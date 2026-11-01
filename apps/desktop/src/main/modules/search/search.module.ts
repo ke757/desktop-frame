@@ -1,7 +1,8 @@
 import { contract } from '@desktop-frame/contracts';
 import type { AppModule } from '../../core';
 import { searchDeployment } from './search.deployment';
-import { searchService, searchToken } from './search.service';
+import { searchService } from './search.service';
+import { searchToken } from './api';
 
 /**
  * search 模块：接入一个外部领域服务的完整范例——

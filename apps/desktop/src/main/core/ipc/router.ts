@@ -1,24 +1,24 @@
 import type { Procedure, RpcResult } from '@desktop-frame/contracts';
 import { RpcError, err, ok } from '@desktop-frame/contracts';
 import type { z } from 'zod';
-import type { AppEnv } from '../ports/env';
-import type { Lifecycle } from '../lifecycle';
-import type { ServiceAccessor } from '../ports/di';
-import type { EventPublisher } from '../ports/event-publisher';
+import type { AppEnv } from '../api/env';
+import type { LifecycleView } from '../api/lifecycle';
+import type { ServiceAccessor } from '../api/di';
+import type { EventPublisher } from '../api/event-publisher';
 import type {
     HandlerContext,
     RouteHandler,
     RouteRegistrar,
-} from '../ports/route-registrar';
-import type { IpcCallInfo, IpcTransport } from '../ports/ipc-transport';
-import type { Logger } from '../ports/logger';
+} from '../api/route-registrar';
+import type { IpcCallInfo, IpcTransport } from '../spi/ipc-transport';
+import type { Logger } from '../api/logger';
 
 /** 路由构造选项。 */
 export interface RouterOptions {
     /** 服务获取器（构造 per-call ctx 用）。 */
     readonly services: ServiceAccessor;
-    /** 生命周期状态机（调用门禁）。 */
-    readonly lifecycle: Lifecycle;
+    /** 生命周期视图（调用门禁只读当前状态）。 */
+    readonly lifecycle: LifecycleView;
     /** 环境信息（frame 来源白名单）。 */
     readonly env: AppEnv;
     /** 根 logger。 */
@@ -47,6 +47,8 @@ function issueSummary(error: z.ZodError): unknown {
  * 契约优先的 IPC 路由。每次调用依次经过：
  * 来源白名单 -> 生命周期门禁 -> 输入校验 -> handler -> 输出校验，
  * 恒以 RpcResult 信封 resolve（错误为何不走 reject 见 contracts/rpc）。
+ * 声明登记（handle）发生在 build 阶段，channel 冲突先于任何启动副作用暴露；
+ * install（绑定 transport）发生在 run 阶段、lifecycle ready 之前。
  */
 export class IpcRouter implements RouteRegistrar {
     private readonly routes = new Map<string, RouteEntry>();

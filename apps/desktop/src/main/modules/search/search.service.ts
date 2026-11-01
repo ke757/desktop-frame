@@ -7,10 +7,9 @@ import {
 import type { EventPublisher, Logger } from '../../core';
 import {
     defineService,
-    deploymentsToken,
+    deploymentReadinessToken,
     eventsToken,
     loggerToken,
-    serviceToken,
 } from '../../core';
 import {
     ExternalServiceError,
@@ -18,6 +17,7 @@ import {
     type DisposableService,
     type ExternalServiceClient,
 } from '../../core';
+import { searchToken, type SearchService } from './api';
 import { SEARCH_DEPLOYMENT_ID } from './search.deployment';
 
 /** WS 重连的基础退避（ms，按尝试次数指数增长）。 */
@@ -26,25 +26,10 @@ const RECONNECT_BASE_DELAY_MS = 500;
 const MAX_RECONNECT_DELAY_MS = 10_000;
 
 /**
- * 搜索服务的**公开接口**：内部消费方看到的一切。它代理外部的搜索领域
- * 服务（独立可执行程序，HTTP + WebSocket）——外部服务的细节（URL、就绪
- * 等待、重连）被封装在实现里，消费方只面对普通的服务方法。
- */
-export interface SearchService {
-    /** 调用外部搜索服务的 HTTP 端点。 */
-    search(query: string): Promise<SearchResponse>;
-    /** 订阅外部索引更新（非阻塞：就绪后建 WS 连接，推送转发为内部事件）。 */
-    startListening(): void;
-}
-
-/** 搜索服务的服务 token（类型即公开接口）。 */
-export const searchToken = serviceToken<SearchService>('modules.search');
-
-/**
  * 搜索服务实现：外部领域服务的适配层（anti-corruption 层）——
  * 经 ExternalServiceClient 与外部服务通信，把 HTTP 失败翻译为 RpcError、
  * 把 WS 推送桥接为内部事件（appEvents.searchIndexChanged）。连接断开时
- * 指数退避重连，dispose 时统一收口。
+ * 指数退避重连，dispose 时统一收口。公开接口与 token 在 ./api.ts。
  */
 export class SearchServiceImpl implements SearchService, DisposableService {
     private socket: WebSocket | undefined;
@@ -182,7 +167,8 @@ function toRpcError(cause: unknown): RpcError {
 
 /** 搜索服务的注册定义：组装控制面依赖并构造代理客户端。 */
 export const searchService = defineService(searchToken, async (accessor) => {
-    const manager = await accessor.get(deploymentsToken);
+    // 客户端只需要就绪查询受众（getStatus/whenReady），不取得部署管理权限。
+    const manager = await accessor.get(deploymentReadinessToken);
     const logger = await accessor.get(loggerToken);
     const events = await accessor.get(eventsToken);
     const client = createExternalServiceClient({

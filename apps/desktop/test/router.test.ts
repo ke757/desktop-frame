@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { procedure, RpcError } from '@desktop-frame/contracts';
-import { ServiceContainer } from '../src/main/core/container';
-import type { AppEnv } from '../src/main/core/ports/env';
+import { ServiceContainer } from '../src/main/core/kernel/container';
+import type { AppEnv } from '../src/main/core';
 import { EventPublisherImpl } from '../src/main/core/ipc/events';
 import { IpcRouter } from '../src/main/core/ipc/router';
-import type { IpcListener, IpcTransport } from '../src/main/core/ports/ipc-transport';
-import { Lifecycle } from '../src/main/core/lifecycle';
-import { MemoryLogger } from '../src/main/core/logging';
+import type { IpcListener, IpcTransport } from '../src/main/core/spi/ipc-transport';
+import { Lifecycle } from '../src/main/core/kernel/lifecycle';
+import { MemoryLogger } from '../src/main/core/kernel/logging';
 
 /** 测试用 echo procedure。 */
 const echo = procedure(
@@ -20,9 +20,11 @@ const echo = procedure(
 function fakeEnv(overrides: Partial<AppEnv> = {}): AppEnv {
     return {
         isDev: true,
+        isPackaged: false,
         devServerUrl: 'http://localhost:5173',
         appName: 'test',
         appVersion: '0.0.0',
+        appLocale: 'en-US',
         userDataPath: '/tmp',
         mainDir: '/tmp',
         preloadPath: '/tmp/preload.cjs',

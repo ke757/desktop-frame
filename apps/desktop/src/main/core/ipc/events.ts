@@ -1,10 +1,10 @@
 import type { EventDefinition, EventPayload } from '@desktop-frame/contracts';
-import type { EventPublisher } from '../ports/event-publisher';
-import type { EventSink } from '../ports/event-sink';
-import type { Logger } from '../ports/logger';
+import type { EventPublisher } from '../api/event-publisher';
+import type { EventSink } from '../spi/window';
+import type { Logger } from '../api/logger';
 
 /**
- * 事件发布器的实现（接口见 ports/event-publisher.ts）：
+ * 事件发布器的实现（接口见 api/event-publisher.ts）：
  * 校验负载后经 EventSink 扇出；校验失败记日志并丢弃。
  */
 export class EventPublisherImpl implements EventPublisher {

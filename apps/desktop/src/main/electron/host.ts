@@ -1,8 +1,8 @@
 import { app } from 'electron';
-import type { BeforeQuitEvent, HostApp } from '../core/ports/host';
+import type { BeforeQuitEvent, HostRuntime } from '../core/spi/host';
 
-/** 把 electron 的 `app` 模块适配为接口 HostApp。 */
-export function createElectronHost(): HostApp {
+/** 把 electron 的 `app` 模块适配为 HostRuntime SPI。 */
+export function createElectronHost(): HostRuntime {
     return {
         isPackaged: app.isPackaged,
         getName: () => app.getName(),

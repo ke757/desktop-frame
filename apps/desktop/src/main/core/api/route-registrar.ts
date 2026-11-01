@@ -6,10 +6,10 @@ import type {
 import type { ServiceAccessor } from './di';
 import type { Logger } from './logger';
 import type { EventPublisher } from './event-publisher';
-import type { IpcCallInfo } from './ipc-transport';
+import type { IpcCallInfo } from '../spi/ipc-transport';
 
 /**
- * 路由注册端口：业务模块在 registerRoutes 中消费它声明端点；
+ * 路由注册 API：业务模块在 registerRoutes 中消费它声明端点；
  * 实现见 core/ipc/router.ts（IpcRouter）。
  */
 

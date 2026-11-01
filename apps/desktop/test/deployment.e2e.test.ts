@@ -3,8 +3,8 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SearchResponseSchema } from '@desktop-frame/contracts';
 import { DeploymentManagerImpl } from '../src/main/core/deployment/manager';
-import { createExternalServiceClient } from '../src/main/core/deployment/client';
-import { MemoryLogger } from '../src/main/core/logging';
+import { createExternalServiceClient } from '../src/main/core';
+import { MemoryLogger } from '../src/main/core/kernel/logging';
 import { createNodeProcessHost } from '../src/main/electron/process-host';
 import { freePort, makeEnv, waitUntil } from './fakes';
 

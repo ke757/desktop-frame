@@ -1,6 +1,7 @@
 /**
- * 日志端口：core 与业务只依赖此接口；`electron/logging.ts` 用
- * electron-log 实现它，测试用 core/logging.ts 的 MemoryLogger。
+ * 日志 API（模块作者公共接口）：core、业务与测试只依赖此接口。
+ * 实现集合（MemoryLogger/ConsoleLogger）见 core/kernel/logging.ts，
+ * 应用侧由 electron/logging.ts（electron-log）实现。
  */
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';

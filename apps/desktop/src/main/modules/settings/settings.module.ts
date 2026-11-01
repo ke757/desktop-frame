@@ -1,6 +1,7 @@
 import { contract } from '@desktop-frame/contracts';
 import type { AppModule } from '../../core';
-import { settingsService, settingsToken } from './settings.service';
+import { settingsService } from './settings.service';
+import { settingsToken } from './api';
 
 /**
  * settings 模块：一个暴露于类型化路由之上的 app 级服务

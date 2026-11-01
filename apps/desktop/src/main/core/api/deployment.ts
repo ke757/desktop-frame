@@ -1,8 +1,14 @@
 /**
- * 部署端口：外部领域服务（独立可执行程序）接入框架的配置契约与控制面
- * 公开接口。配置类型（DeploymentSpec/DeploymentProfile）由业务模块申报、
- * 框架消费；DeploymentManager 是控制面的公开面（token 的类型参数，实现见
- * core/deployment/manager.ts 的 DeploymentManagerImpl）。
+ * 部署 API（模块作者公共面）：外部领域服务（独立可执行程序）接入框架的
+ * 配置契约与按受众分离的控制面接口。
+ *
+ * 同一个控制面对象承载三个逻辑接口，按受众分发（实现见
+ * core/deployment/manager.ts，完整类型见 core/deployment/controller.ts）：
+ * - DeploymentReadiness：外部服务客户端（createExternalServiceClient）的
+ *   查询与就绪面；
+ * - DeploymentAdmin：deployments 管理模块的管理面（list/start/stop/restart）；
+ * - DeploymentController：框架内部受众（register/startAll/stopAll），刻意
+ *   不在本文件——它不从 core 公共面导出。
  *
  * 状态/快照的线上格式与 `@desktop-frame/contracts` 的 schema 平行定义
  * （同 LifecycleState 的既有惯例），一致性由 desktop 侧测试守护。
@@ -31,6 +37,8 @@ export interface DeploymentSpec {
     readonly id: string;
     /** 运行模式（缺省 'managed'；dev profile 可覆盖为 'external'）。 */
     readonly mode?: DeploymentMode;
+    /** 是否为应用启动的硬依赖（缺省 false）：required 部署启动失败会使 startAll reject、应用启动回滚；可选部署失败只记录状态、不阻止其余模块启动。 */
+    readonly required?: boolean;
     /** 可执行文件（managed 模式必填；external 模式忽略）。 */
     readonly command?: string;
     /** 命令行参数。 */
@@ -111,27 +119,46 @@ export class InvalidDeploymentError extends DeploymentError {}
 /** 部署未在期望时间内就绪（whenReady 超时或终态）。 */
 export class DeploymentNotReadyError extends DeploymentError {}
 
+/** 部署启动失败（托管拉起失败/就绪超时，或 required 部署令 startAll 整体失败）。 */
+export class DeploymentStartFailedError extends DeploymentError {
+    /** 启动失败的部署 id 集合。 */
+    readonly deploymentIds: readonly string[];
+
+    constructor(message: string, deploymentIds: readonly string[]) {
+        super(message);
+        this.name = 'DeploymentStartFailedError';
+        this.deploymentIds = deploymentIds;
+    }
+}
+
 /** 控制面已随应用关停关闭，不再接受启动类操作。 */
 export class DeploymentManagerClosedError extends DeploymentError {}
 
 /**
- * 部署控制面的公开接口：业务模块经 `deploymentsToken` 消费。框架内部的
- * 注册与批量编排（register/startAll/stopAll）刻意不在此面——它们由
- * DesktopApp 在启动/关停时序中独占调用（受众分离，同 DisposableService）。
+ * 部署控制面的就绪查询受众：外部服务适配层（createExternalServiceClient）
+ * 经 `deploymentReadinessToken` 消费。注册与批量编排（register/startAll/
+ * stopAll）与管理面（start/stop/restart）都不在此受众——权限按需分发。
  */
-export interface DeploymentManager {
-    /** 全部部署的状态快照（按注册顺序）。 */
-    list(): DeploymentStatus[];
+export interface DeploymentReadiness {
     /** 单个部署的状态快照；未知 id 返回 undefined。 */
     getStatus(id: string): DeploymentStatus | undefined;
+    /** 等待部署就绪（running）；终态或超时 reject DeploymentNotReadyError。 */
+    whenReady(id: string, timeoutMs?: number): Promise<void>;
+    /** 订阅状态迁移；返回取消订阅函数。 */
+    onChange(listener: (change: DeploymentChange) => void): () => void;
+}
+
+/**
+ * 部署控制面的管理受众：deployments 管理模块经 `deploymentAdminToken`
+ * 消费，供 renderer 的控制面面板使用。不含声明接管与批量编排。
+ */
+export interface DeploymentAdmin {
+    /** 全部部署的状态快照（按注册顺序）。 */
+    list(): DeploymentStatus[];
     /** 启动部署并返回快照（managed 等待就绪或失败；external 立即返回 waiting）。 */
     start(id: string): Promise<DeploymentStatus>;
     /** 停止部署并返回快照（managed 优雅终止；external 撤销探测）。 */
     stop(id: string): Promise<DeploymentStatus>;
     /** 重启部署（停止后重新启动）并返回快照。 */
     restart(id: string): Promise<DeploymentStatus>;
-    /** 等待部署就绪（running）；终态或超时 reject DeploymentNotReadyError。 */
-    whenReady(id: string, timeoutMs?: number): Promise<void>;
-    /** 订阅状态迁移；返回取消订阅函数。 */
-    onChange(listener: (change: DeploymentChange) => void): () => void;
 }

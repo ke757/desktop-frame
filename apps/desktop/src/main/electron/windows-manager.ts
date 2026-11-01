@@ -1,8 +1,10 @@
 import { BrowserWindow } from 'electron';
-import type { AppEnv } from '../core/ports/env';
-import type { Logger } from '../core/ports/logger';
-import type { WindowDefinition as CoreWindowDefinition } from '../core/ports/window-host';
-import type { WindowHost } from '../core/ports/window-host';
+import type { AppEnv } from '../core/api/env';
+import type { Logger } from '../core/api/logger';
+import type {
+    WindowController,
+    WindowDefinition as CoreWindowDefinition,
+} from '../core/spi/window';
 
 /**
  * Electron 侧的窗口配方（收窄 core 的 WindowDefinition）：`create` 负责构造
@@ -23,9 +25,10 @@ export interface ManagedWindow {
 
 /**
  * 窗口生命周期的唯一管理者：创建、跟踪、事件扇出与有序关闭。
- * 实现 core 的 WindowHost（DesktopApp 依赖该抽象，测试用 Fake 替换）。
+ * 实现 core 的 WindowController SPI（DesktopApp 依赖该抽象，测试用 Fake
+ * 替换）。完整控制器仅供内核与适配器使用，不作为业务 token 公开。
  */
-export class WindowManager implements WindowHost {
+export class WindowManager implements WindowController {
     private readonly definitions = new Map<string, CoreWindowDefinition>();
     private readonly open = new Map<string, ManagedWindow>();
 

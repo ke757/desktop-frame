@@ -1,6 +1,6 @@
 /**
- * 进程宿主端口：把「启动/终止操作系统子进程」这一外部能力抽象为 core
- * 拥有的接缝。DeploymentManager 只依赖该抽象（不触碰 node:child_process），
+ * 进程宿主 SPI：把「启动/终止操作系统子进程」这一外部能力抽象为 core
+ * 拥有的接缝。部署控制面只依赖该抽象（不触碰 node:child_process），
  * 测试注入假实现即可覆盖进程编排逻辑。
  *
  * 实现方为 `electron/process-host.ts`（node:child_process 适配）。Electron
@@ -33,7 +33,7 @@ export interface ProcessExit {
 export interface HostedProcess {
     /** 子进程 pid（异步启动失败时可能为 undefined）。 */
     readonly pid: number | undefined;
-    /** 终止进程；升级到 SIGKILL 的策略由调用方（DeploymentManager）决定。 */
+    /** 终止进程；升级到 SIGKILL 的策略由调用方（部署控制面）决定。 */
     kill(signal?: string): void;
     /** 进程退出（或启动失败）后 resolve 一次；永不 reject。 */
     readonly exited: Promise<ProcessExit>;
@@ -41,7 +41,7 @@ export interface HostedProcess {
     onOutput(listener: (stream: 'stdout' | 'stderr', line: string) => void): () => void;
 }
 
-/** 进程宿主端口：控制面拉起外部可执行程序的唯一通道。 */
+/** 进程宿主 SPI：控制面拉起外部可执行程序的唯一通道。 */
 export interface ProcessHost {
     /** 启动一个子进程；同步返回句柄，启动失败经 `exited` 的 error 表达。 */
     spawn(options: SpawnOptions): HostedProcess;

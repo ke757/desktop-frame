@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { EventPublisherImpl } from '../src/main/core/ipc/events';
-import { MemoryLogger } from '../src/main/core/logging';
+import { MemoryLogger } from '../src/main/core/kernel/logging';
 import { SettingsServiceImpl } from '../src/main/modules/settings/settings.service';
 
 /** 每个用例创建的临时目录，结束后统一清理。 */

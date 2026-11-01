@@ -1,5 +1,5 @@
 import log from 'electron-log/main';
-import type { LogMeta, Logger } from '../core/ports/logger';
+import type { LogMeta, Logger } from '../core/api/logger';
 
 /**
  * 基于 electron-log v5 的主进程 logger。`scope()` 只返回裸日志函数，

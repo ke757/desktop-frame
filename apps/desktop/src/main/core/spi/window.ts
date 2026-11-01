@@ -1,8 +1,7 @@
-import type { AppEnv } from './env';
-import type { EventSink } from './event-sink';
+import type { AppEnv } from '../api/env';
 
 /**
- * 窗口端口（core 侧纯接口）。`create` 返回宿主窗口对象（Electron 下为
+ * 窗口 SPI（core 侧纯接口）。`create` 返回宿主窗口对象（Electron 下为
  * BrowserWindow）；具体类型由适配层（electron/windows-manager.ts）收窄。
  */
 export interface WindowDefinition<W = unknown> {
@@ -15,11 +14,21 @@ export interface WindowDefinition<W = unknown> {
 }
 
 /**
- * 窗口宿主端口：DesktopApp 依赖此抽象而非具体窗口管理器，使框架核心
- * 保持零 electron 依赖、可用 FakeWindowHost 做集成测试。
- * Electron 实现见 electron/windows-manager.ts（WindowManager）。
+ * 事件出口 SPI：事件投递的最小面。core 不关心事件去了哪里——
+ * Electron 下由 WindowController（webContents.send）实现，测试用内存 sink。
  */
-export interface WindowHost extends EventSink {
+export interface EventSink {
+    /** 把一个事件负载投递出去（channel + structured-clone 安全的负载）。 */
+    send(channel: string, payload: unknown): void;
+}
+
+/**
+ * 窗口控制器 SPI：DesktopApp 依赖此抽象而非具体窗口管理器，使框架核心
+ * 保持零 electron 依赖、可用 Fake 替换做集成测试。
+ * Electron 实现见 electron/windows-manager.ts（WindowManager）。
+ * 完整控制器仅供内核与适配器使用，不作为业务 token 公开。
+ */
+export interface WindowController extends EventSink {
     /** 注册一个窗口定义（id 重复抛错）。 */
     register(definition: WindowDefinition): void;
     /** 主窗口定义 id（无注册定义时为 undefined）。 */

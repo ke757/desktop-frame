@@ -1,28 +1,8 @@
 /**
  * core 的公共面（barrel）：模块层与装配脚本只允许从这里 import core
- * （守护测试强制）；core 内部实现文件（builder/desktop-app/container 等）
- * 不对业务开放。
+ * （守护测试强制）。只显式导出模块作者确实需要的符号（模块协议、受限
+ * 上下文、DI 词汇、公开能力接口与 token、部署受众接口、外部服务客户端），
+ * 内核实现（ServiceContainer/Lifecycle/IpcRouter/DeploymentManagerImpl/
+ * DesktopApp/builder）、内部 controller token 与 Electron SPI 一律不导出。
  */
-export * from './ports/host';
-export * from './ports/window-host';
-export * from './ports/event-sink';
-export * from './ports/event-publisher';
-export * from './ports/ipc-transport';
-export * from './ports/route-registrar';
-export * from './ports/logger';
-export * from './ports/env';
-export * from './ports/di';
-export * from './ports/module';
-export * from './ports/process-host';
-export * from './ports/deployment';
-export * from './container';
-export * from './lifecycle';
-export * from './env';
-export * from './logging';
-export * from './ipc/router';
-export * from './ipc/events';
-export * from './deployment/manager';
-export * from './deployment/client';
-export * from './tokens';
-export * from './desktop-app';
-export * from './builder';
+export * from './api';

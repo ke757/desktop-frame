@@ -1,12 +1,12 @@
 import path from 'node:path';
-import type { AppEnv, RendererEntry } from './ports/env';
-import type { HostApp } from './ports/host';
+import type { AppEnv, RendererEntry } from '../api/env';
+import type { HostRuntime } from '../spi/host';
 
 /** dev 模式下 web dev server 的默认地址（可用 WEB_DEV_SERVER_URL 覆盖）。 */
 export const DEFAULT_DEV_SERVER_URL = 'http://localhost:5173';
 
-/** 从 HostApp 解析环境信息；mainDir 通常传构建产物的 __dirname。 */
-export function resolveEnv(host: HostApp, mainDir: string): AppEnv {
+/** 从 HostRuntime 解析环境信息；mainDir 通常传构建产物的 __dirname。 */
+export function resolveEnv(host: HostRuntime, mainDir: string): AppEnv {
     const isDev = !host.isPackaged;
     const devServerUrl = isDev
         ? (process.env.WEB_DEV_SERVER_URL ?? DEFAULT_DEV_SERVER_URL)
@@ -30,9 +30,11 @@ export function resolveEnv(host: HostApp, mainDir: string): AppEnv {
 
     return {
         isDev,
+        isPackaged: host.isPackaged,
         devServerUrl,
         appName: host.getName(),
         appVersion: host.getVersion(),
+        appLocale: host.getLocale(),
         userDataPath: host.getPath('userData'),
         mainDir,
         preloadPath: path.join(mainDir, 'preload.cjs'),

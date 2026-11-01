@@ -36,63 +36,92 @@
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### 2.1 启动装配（builder 形态，对齐 Tauri v2 / FastAPI）
+### 2.1 启动装配（builder + Electron 默认装配工厂，对齐 Tauri v2 / FastAPI）
 
 启动控制权在框架（总对象）而非调用方——业务只声明，框架驱动（FastAPI 的 `lifespan` 由框架调用；Tauri 的 `setup` 钩子与 `App::run` 事件循环同理）：
 
 ```ts
-// main/index.ts —— 装配脚本（唯一声明"应用由什么组成"的地方）
+// main/index.ts —— 装配脚本（唯一声明"应用由什么组成"的地方，
+// 也是唯一同时接触具体模块、Electron 默认装配与窗口声明的位置）
 buildDesktopApp():
-  desktopApp({ host, transport, createWindows, mainDir, createLogger })
-      .use(systemModule, settingsModule)   // 声明业务模块
-      .window(createMainWindowDefinition()) // 声明窗口
-      .build();                            // 构造对象图，不启动（Tauri build 语义）
+  createElectronDesktopApp({ mainDir, deploymentProfile }) // Electron 默认装配工厂
+      .use(systemModule, settingsModule, deploymentsModule, searchModule)
+      .window(createMainWindowDefinition())                 // 声明窗口
+      .build();                                             // 纯声明装配，不启动
 
 // main.ts —— 进程壳（进程级策略集中于此，对齐 Tauri main.rs 的 .expect）
 squirrel → 单实例锁 → buildDesktopApp() → 全局异常兜底 → .run()
-  .catch(() => process.exit(1));
+  .catch((cause) => { logger.error(...); process.exit(1); });
 ```
+
+`createElectronDesktopApp`（`electron/app-factory.ts`）负责生产装配的适配器噪音（Host、IPC transport、ProcessHost、WindowManager、electron-log logger）；底层 `desktopApp(...)` builder（`core/kernel/builder.ts`）不从业务公共 barrel 导出，仍允许测试注入 Fake runtime 直用。
+
+**阶段语义**（对齐 Tauri `build(context)` 的"does not start the application"）：
+
+- **build**：构造核心对象图；登记服务工厂、路由、窗口与部署声明；校验模块 id、service token、IPC channel、窗口 id、部署 id 的重复声明。不打开数据库、不启动 sidecar、不安装 IPC transport、不创建实际窗口、不执行模块 init——纯声明冲突在任何启动副作用之前同步抛错。
+- **run**：① 解析部署控制面、接线宿主事件并等待 `host.whenReady()` → ② 启动部署（required 失败整体 reject）→ ③ 模块 init（显式解析必须 eager 的服务）→ ④ 安装 IPC transport → ⑤ lifecycle `ready` → ⑥ 等 dev server（如适用）并打开主窗口 → ⑦ 挂起直到 `exited`。启动失败复用关停管线统一回滚后 reject，进程壳决定非零退出。
 
 | Tauri v2 | 本基座 |
 | --- | --- |
-| `Builder::default().plugin().setup().manage()` | `desktopApp(opts).use(mod).window(def)` |
-| `build(context) → App`（不启动） | `.build() → DesktopApp`（不启动，对象图可检视） |
-| `App::run(cb)` 阻塞至退出 | `.run()` Promise 至 lifecycle `exited` |
+| `Builder::default().plugin().setup().manage()` | `createElectronDesktopApp(opts).use(mod).window(def)` |
+| `build(context) → App`（不启动） | `.build() → DesktopApp`（纯声明装配，冲突先于副作用暴露） |
+| `App::run(cb)` 阻塞至退出 | `.run()` Promise 至 lifecycle `exited`（启动失败先回滚再 reject） |
 | `RunEvent::ExitRequested { api.prevent_exit() }` | `before-quit` preventDefault → joiner 管线 |
-| `setup(\|app\|)` 钩子 | `module.init(ctx)`（+ dispose/onShutdown = lifespan 关停段） |
-| `AppHandle::exit(code)` | `HostApp.quit()`（业务经 `hostToken` 取用；框架自身另有 `DesktopApp.quit()`） |
+| `setup(\|app\|)` 钩子 | `module.init(ctx)`（+ 对称的 `module.dispose(ctx)` = lifespan 关停段） |
+| `AppHandle::exit(code)` | `AppControl.quit()`（业务经 `appControlToken` 取用；框架自身另有 `DesktopApp.quit()`） |
 
-**接线与声明的分离**是关键：核心对象的互连（lifecycle/container/windows/events/router 之间的构造注入）全部收敛在 `core/builder.ts` 的 `build()`——一次性框架代码，只在框架演进时改动且有集成测试守护；应用的高频变化（加模块、加窗口）只触碰装配脚本里的一行 `.use()` / `.window()`，不碰任何接线。核心对象间的"互含"用接口倒置消解（如 `EventPublisher` 依赖 `EventSink`/`WindowHost` 接口，`WindowManager` 是其 Electron 实现），构造顺序固定为 DAG。
+**接线与声明的分离**是关键：核心对象的互连（lifecycle/container/windows/events/router 之间的构造注入）全部收敛在 `core/kernel/builder.ts` 的 `build()`——一次性框架代码，只在框架演进时改动且有集成测试守护；应用的高频变化（加模块、加窗口）只触碰装配脚本里的一行 `.use()` / `.window()`，不碰任何接线。核心对象间的"互含"用接口倒置消解（如 `EventPublisher` 依赖 `EventSink`/`WindowController` 接口，`WindowManager` 是其 Electron 实现），构造顺序固定为 DAG。
 
-### 2.2 端口与适配器（六边形架构的显式化）
+### 2.2 目标结构与依赖方向
 
-`main/core/ports/` 与 `main/electron/` 是一对镜像目录：**ports 是 core 拥有的接缝接口（一侧是框架、一侧是外部世界），electron/ 的每个文件实现一个端口**。端口清单与实现一一对应：
+```
+apps/desktop/src/main/
+  core/
+    api/                 # 模块作者公共 API：模块协议、上下文、公开能力、token
+    kernel/              # DesktopApp、Builder、Lifecycle、Container、内核 token
+    spi/                 # HostRuntime、IpcTransport、ProcessHost、WindowController
+    ipc/                 # Router、EventPublisher 实现
+    deployment/          # 部署控制面实现（controller 类型 + DeploymentManagerImpl）
+    index.ts             # 只显式导出模块作者 API，不导出内部实现
+  electron/              # Electron/Node 适配器 + 默认装配工厂（app-factory.ts）
+  modules/
+    settings/  search/  system/  deployments/
+      api.ts             # 跨模块公开：接口 + token
+      *.module.ts        # 只允许组合根导入
+      *.service.ts       # 实现与注册工厂，模块私有
+  index.ts               # 应用组合根（装配脚本）
+  windows.ts             # 应用窗口声明
+```
 
-| 端口（core/ports/） | 实现方 |
+三个目录回答"接口为谁而生"：
+
+- **`core/api/`（模块作者公共 API）**：业务模块可见的一切——`AppModule`/`ModuleInitContext`/`HandlerContext`、DI 词汇（token/accessor/factory）、`Logger`/`AppEnv`/`EventPublisher`/`RouteRegistrar`、`AppControl`、`LifecycleView`（只读）、部署数据契约与受众接口（`DeploymentReadiness`/`DeploymentAdmin`）、`createExternalServiceClient`、公开能力 token。不依赖 kernel/ipc/deployment 实现或 Electron。
+- **`core/spi/`（宿主适配接缝，SPI）**：只有真实由 Electron/Node/OS 适配器实现的接缝——`HostRuntime`（electron `app`）、`IpcTransport`（ipcMain）、`ProcessHost`（node:child_process）、`WindowController`/`WindowDefinition`/`EventSink`（BrowserWindow）。框架专用能力（宿主事件订阅、`exit()`、`closeAll`）只在此层，不对业务公开。
+- **`core/kernel/`（内核实现）**：`DesktopApp`、`DesktopAppBuilder`、`ServiceContainer`、`Lifecycle`、`MemoryLogger`/`ConsoleLogger`、`resolveEnv`、内部 token（进程宿主、部署控制面 controller）。逻辑内核 = DesktopApp + Lifecycle + Container + 模块激活 + IpcRouter + 启动/关停编排——**不设 Kernel 总控对象**，DesktopApp 仍是唯一的应用生命周期所有者。
+
+**不进入以上任何分类的东西**：Module、Route、WindowDefinition、DeploymentSpec 是声明，不是服务；是否进入 container、是否参与 App 启动流程、是否向业务公开是三个独立决策——需要跨模块共享/替换/统一回收的应用级对象进 container；固定且业务不可替换的框架机制由 builder 直接构造注入；模块私有协作者由服务工厂直接 `new`。服务默认 lazy，必须在 ready 前就绪的由模块 init 显式解析。Database 类普通基础设施可作为普通容器服务存在，无需修改 DesktopApp——部署控制面的容器工厂需要它时经 accessor 自然解析。
+
+electron 适配器与 SPI 一一对应：
+
+| SPI（core/spi/） | 实现方 |
 | --- | --- |
-| `host.ts`（HostApp + BeforeQuitEvent） | `electron/host.ts` |
+| `host.ts`（HostRuntime + BeforeQuitEvent） | `electron/host.ts` |
 | `ipc-transport.ts`（IpcTransport + IpcListener + IpcCallInfo） | `electron/ipc-transport.ts` |
-| `window-host.ts`（WindowHost + WindowDefinition）、`event-sink.ts`（EventSink） | `electron/windows-manager.ts` |
-| `logger.ts`（Logger + LogLevel + LogMeta） | `electron/logging.ts`、core 的 MemoryLogger |
-| `event-publisher.ts`（EventPublisher） | core 的 `EventPublisherImpl` |
-| `module.ts`（AppModule + ModuleInitContext，driving port） | `modules/**` |
-| `di.ts`（ServiceToken/ServiceAccessor/DisposableService 等 DI 词汇） | core 的 ServiceContainer |
-| `route-registrar.ts`（RouteRegistrar + HandlerContext + RouteHandler） | core 的 IpcRouter |
-| `env.ts`（AppEnv 数据契约） | core 的 resolveEnv 产出 |
-| `process-host.ts`（ProcessHost + HostedProcess + SpawnOptions） | `electron/process-host.ts`（node:child_process 适配） |
-| `deployment.ts`（DeploymentManager + DeploymentSpec/Profile 数据契约） | core 的 `DeploymentManagerImpl` |
+| `window.ts`（WindowController + WindowDefinition + EventSink） | `electron/windows-manager.ts` |
+| `process-host.ts`（ProcessHost + HostedProcess + SpawnOptions） | `electron/process-host.ts`（node:child_process 适配，OS 级适配器与 electron 适配器同居适配层） |
 
-判定口径：**接口存在是为了让 core 之外的某方实现或消费，才是 port**；框架自身实现（Lifecycle、ServiceContainer、IpcRouter、DesktopApp、builder）不是 port，不做每类一接口的抽象（无多实现前景、无仅内部可见的公开方法、同包同版本内 DIP 无收益）。`AppEnv` 作为共享内核数据契约随 ports 存放（适配器与业务共同消费）。
+core 内部实现（Logger/MemoryLogger、EventPublisher、RouteRegistrar、DeploymentManagerImpl、AppEnv 产出）的"接口"住在 `core/api/`，实现住在对应实现目录——它们不是 SPI（无 core 之外的实现方），只按受众拆分公开面。
 
-分层规则（保证可测试性的关键，全部由守护测试固化）：
+分层规则（保证可测试性与封装性的关键，全部由 `test/architecture.test.ts` 静态扫描固化）：
 
-- `main/core/**`：**纯 TS，零 electron 依赖**，相对 import 不逃出 core；`core/ports/**` 只依赖 ports。
-- `main/electron/**`：适配层，对 core 的 import 只允许 `core/ports/**`（端口镜像，依赖方向自证）。
-- `main/modules/**`：对 core 只经 barrel `core/index.ts` 导入；跨模块 import 只允许 `*.service.ts`/`*.module.ts`/`*.tokens.ts`。
-- `main/index.ts`（装配脚本）、`main/windows.ts`（窗口定义，应用声明而非适配器）。
-- `src/main.ts` / `src/preload.ts`：仅有的两个构建入口。
+1. `main/core/**`：纯 TS，零 electron 依赖，相对 import 不逃出 core。
+2. `core/api/**` 只依赖 api 内部、spi 与 contracts，不依赖 kernel/ipc/deployment 实现。
+3. `core/spi/**` 只包含宿主适配接缝及其必要数据类型。
+4. `electron/**` 对 core 只 import `core/api/**`、`core/spi/**`（唯一豁免：`electron/app-factory.ts` 作为生产组合根入口可 import `core/kernel/builder`）；不 import 业务模块与组合根。
+5. `modules/**` 对 core 只经 barrel `core/index.ts` 导入，不深层导入 kernel、ipc 或 deployment 实现；跨模块 import 只允许指向对方 `api.ts`；`*.module.ts` 只允许组合根导入。
+6. `main/index.ts`（组合根）是唯一可以同时接触具体模块、Electron 默认装配和窗口声明的位置；`src/main.ts`/`src/preload.ts` 是仅有的两个构建入口。
 
-## 3. 生命周期状态机（`core/lifecycle.ts`）
+## 3. 生命周期状态机（`core/kernel/lifecycle.ts`）
 
 ```
 initializing ──→ ready ──→ shuttingDown ──→ exited
@@ -102,21 +131,25 @@ initializing ──→ ready ──→ shuttingDown ──→ exited
 - **可等待**：`when(state)` 返回 Promise（已到达则立即 resolve），启动编排用它挂接阶段任务（对应 VS Code 的 `when(phase)`）。
 - **关停管线**：`onShutdown(joiner)` 注册清理函数，`shutdown()` 顺序执行、逐个容错（失败记日志不中断），最终落 `exited`。这是 VS Code `onWillShutdown` + `e.join()` 的等价物。
 
-Electron 原生事件到状态机的映射（`core/desktop-app.ts` 的 `DesktopApp.run()`）：
+完整状态机由内核独占持有：`transition()`/`shutdown()`/`onShutdown()` 不经任何公开 token 暴露。模块与进程壳只见只读视图 `LifecycleView`（`state`/`when`/`onChange`，见 `core/api/lifecycle.ts`）——`DesktopApp.lifecycle` 即该视图，测试也用它等待/断言。模块持有的非服务资源由 `AppModule.dispose(ctx)` 回收（关停时按模块逆序、在 container dispose 之前调用）。
+
+Electron 原生事件到状态机的映射（`core/kernel/desktop-app.ts` 的 `DesktopApp.run()`）：
 
 | Electron 事件 | 行为 |
 | --- | --- |
-| `app.whenReady` | 注册模块服务 → 模块 init → 安装路由 → `ready` → 打开主窗口 → 挂起等待 `exited` |
-| `before-quit` | `preventDefault()` → `lifecycle.shutdown()`（窗口先关、服务后 dispose）→ `host.exit(0)` |
+| `app.whenReady` | 解析部署控制面并 `startAll()` → 模块 init → 安装路由 → `ready` → 打开主窗口 → 挂起等待 `exited` |
+| `before-quit` | `preventDefault()` → `lifecycle.shutdown()`（窗口先关、模块逆序 dispose、服务后 dispose、部署最后终止）→ `host.exit(0)` |
 | `window-all-closed` | 非 macOS `quit()`（macOS 留 Dock，`activate` 重开窗口） |
 | `second-instance` | 聚焦已有主窗口（单实例锁在 `main.ts` 进程壳检查） |
 | `uncaughtException` / `unhandledRejection` | 记日志，不崩溃（`main.ts` 安装） |
+
+**启动失败回滚**：`run()` 内任何一步失败（required 部署失败、模块 init 抛错等）都进入统一回滚——复用同一关停管线（幂等、best-effort）清理已初始化模块、已实例化服务、已启动部署与已创建窗口，随后以原错误 reject；框架绝不以正常退出的 `host.exit(0)` 收尾，非零退出码由进程壳决定。build 阶段的同步声明冲突在任何副作用之前抛出。
 
 状态变化会通过 `app.lifecycleChanged` 事件广播给所有 renderer（web 界面左上角徽标实时显示）。
 
 **为什么需要状态机**：Electron 只有事件没有秩序。大型后端需要回答"现在能不能接请求"（路由门禁：非 `ready` 一律返回 `UNAVAILABLE` 信封）、"退出时以什么顺序释放什么"（joiner 顺序即资源依赖序）、"各子系统进行到哪一步了"（`when()` 可等待）。这三个问题裸事件模型回答不了。
 
-## 4. 依赖注入（`core/container.ts`）
+## 4. 依赖注入（`core/kernel/container.ts`）
 
 ### 4.1 与 FastAPI 的对照
 
@@ -131,8 +164,9 @@ Electron 原生事件到状态机的映射（`core/desktop-app.ts` 的 `DesktopA
 - **Token 类型化**：`serviceToken<T>('modules.settings')` —— 不用装饰器/`reflect-metadata`，对任意打包器友好且 tree-shakable（VS Code 需要自定义 TS transform 才能用装饰器元数据，我们不背这个包袱）。
 - **异步工厂**：不同于 VS Code 的纯同步容器，工厂可 `await`（打开数据库、读配置文件），更贴合后端语义。
 - **惰性 + memoize**：首次 `get` 才创建（VS Code `InstantiationType.Delayed` 同款策略，利于启动性能）；失败不缓存可重试。
-- **循环依赖**：解析链检测，抛 `CyclicDependencyError`（带完整链路）。已知限制：工厂内 `Promise.all` 两个存在重叠子图的 `get` 可能误报——避免在工厂里并行取重叠依赖。
-- **逆序 dispose**：按实例化相反顺序调用 `dispose()`（依赖方先释放）；单个失败只记日志，不阻断其余清理。
+- **并发安全**：循环检测的祖先链属于**单次解析上下文**（不可变、随 accessor 传递），不由整个容器共享——顶层并发消费者首次获取同一个冷服务时共享同一个 memoized promise，不会误报循环；真正的 A→B→A 仍快速抛 `CyclicDependencyError`（带完整链路，不退化为等待自身 promise 挂起）。创建 promise 在工厂启动前同步占位，工厂的同步重入解析据此走祖先链检测而不是无限递归；独立/重叠子图并发、乱序完成均不互相干扰。
+- **dispose 唯一且幂等**：dispose 开始后拒绝新的 register/get（对象图不再扩张）；先等所有在途创建落定，再按实例化逆序清理全部成功创建的实例（含 dispose 开始后才完成的"晚到"实例，不逃逸）；单个失败只记日志，不阻断其余清理。
+- **逆序 dispose**：按实例化相反顺序调用 `dispose()`（依赖方先释放）。
 
 ### 4.3 三种获得依赖的方式
 
@@ -154,9 +188,10 @@ registrar.handle(contract.settings.getAll, async (ctx) => {
 
 ### 4.4 接口化 token：公开面与框架钩子分离
 
-暴露给模块外部的服务**必须接口化**，规则是"两个受众、两个接口"：
+暴露给模块外部的服务**必须接口化**，规则是"两个受众、两个接口"；接口与 token 放模块的 `api.ts`：
 
 ```ts
+// modules/settings/api.ts —— 跨模块公开面：只有接口与 token
 /** 公开接口：token 的类型参数 = 外部允许调用的全部方法。 */
 export interface SettingsService {
     get(): SettingsFile;
@@ -164,6 +199,7 @@ export interface SettingsService {
 }
 export const settingsToken = serviceToken<SettingsService>('modules.settings');
 
+// modules/settings/settings.service.ts —— 模块私有
 /** 实现：生命周期方法（load/flush/dispose）不在公开接口里。 */
 export class SettingsServiceImpl implements SettingsService, DisposableService { ... }
 ```
@@ -200,26 +236,27 @@ frame 来源白名单校验 → 生命周期门禁(ready) → 输入 zod 校验
 （任何一步失败 → 对应错误码信封，永不 reject）
 ```
 
-`sender.frameUrl` 白名单：dev 为 web dev server origin，打包后仅 `file://`。
+`sender.frameUrl` 白名单：dev 为 web dev server origin，打包后仅 `file://`。声明登记（`handle`）发生在 build 阶段——channel 冲突先于任何启动副作用暴露；`install`（绑定 transport）发生在 run 阶段、lifecycle ready 之前。
 
 ### 5.4 事件（main → renderer）
 
-`EventPublisher.publish(evt, payload)` 校验后经 `WindowManager.send` 广播到所有存活窗口；preload 包装返回 **unsubscribe 函数**（channel 级多路复用，最后一个订阅者移除时才 `removeAllListeners`，防泄漏）。
+`EventPublisher.publish(evt, payload)` 校验后经 `WindowController.send`（Electron 实现：`WindowManager`）广播到所有存活窗口；preload 包装返回 **unsubscribe 函数**（channel 级多路复用，最后一个订阅者移除时才 `removeAllListeners`，防泄漏）。
 
 ### 5.5 preload 约束（Electron 45）
 
 沙箱 preload 中不可用 Buffer / events / timers / url shim。`src/preload.ts` 只使用 `electron` 模块与标准 Web API；桥是**通用**的（string channel + unknown payload），因此契约演进不需要改 preload。
 
-## 6. 窗口管理（`app/windows/`）
+## 6. 窗口管理（`electron/windows-manager.ts`）
 
-- 声明式 `WindowDefinition`（id、`create(env)` 构造含安全 webPreferences 的 BrowserWindow）；`WindowManager` 负责：加载 renderer 入口（dev URL / 打包文件）、ready-to-show 后显示、跟踪与清理。
+- 声明式 `WindowDefinition`（`core/spi/window.ts`：id、`create(env)` 构造含安全 webPreferences 的 BrowserWindow）；`WindowManager` 实现完整 `WindowController` SPI：加载 renderer 入口（dev URL / 打包文件）、ready-to-show 后显示、跟踪与清理。
 - **提前缓存 `webContents.id`**（electron-trpc #156 的教训：窗口 destroyed 后不可再触碰 `win.webContents`）。
-- `render-process-gone` 记日志；`closeAll()` 在关停管线中先于服务 dispose 执行。
+- `render-process-gone` 记日志；`closeAll()` 在关停管线中先于模块/服务 dispose 执行。
+- 完整控制器（`register`/`closeAll`/主窗口重开策略）仅供内核与适配器使用，不作为业务 token 公开；未来业务确有窗口操作需求时再定义只含所需方法的窄 WindowService。
 - 安全基线：`sandbox: true`、`contextIsolation: true`、`nodeIntegration: false`、`webSecurity: true` 显式声明。
 
-## 7. 模块协议、角色与命名（`core/module.ts`）
+## 7. 模块协议、角色与命名（`core/api/module.ts`）
 
-业务特性以模块接入：`{ id, services?, registerRoutes?, init? }`。装配脚本（`main/index.ts`）只做声明，框架在 `run()` 中按固定时序调用：注册服务 → 注册路由 → 模块 init → 路由上线 → `ready` → 开窗。示例模块 `system`（纯路由：0 个服务）与 `settings`（服务 + 路由 + init）。
+业务特性以模块接入：`{ id, services?, deployments?, registerRoutes?, init?, dispose? }`。装配脚本（`main/index.ts`）只做声明，框架在 `run()` 中按固定时序调用：启动部署 → 模块 init → 路由上线 → `ready` → 开窗；关停时模块逆序 `dispose(ctx)`（在 container dispose 之前）。示例模块 `system`（纯路由：0 个服务）与 `settings`（服务 + 路由 + init）。
 
 ### 7.1 角色词汇表
 
@@ -228,7 +265,7 @@ frame 来源白名单校验 → 生命周期门禁(ready) → 输入 zod 校验
 | **Token** | 依赖接缝的命名句柄（id 即分层标记） | 不是依赖本身/实例 | VS Code `createDecorator` 的 id |
 | **Service（业务服务）** | 运行时对象图节点：有状态、可持资源、可 dispose | 不是文件/模块/"大一号的东西" | Nest provider |
 | **核心部件** | 框架器官（Lifecycle/EventPublisher/WindowManager/IpcRouter） | 业务不可增删；build() 同步构造 | VS Code platform 层 |
-| **Module** | **声明期申报单元**（services+routes+init）；运行时"溶解"为 token 与 channel | 没有运行时实例；不是服务容器 | Nest `@Module` |
+| **Module** | **声明期申报单元**（services+deployments+routes+init/dispose）；运行时"溶解"为 token 与 channel | 没有运行时实例；不是服务容器 | Nest `@Module` |
 | **Handler/Route** | 无状态调用端点（状态放服务） | 不是依赖存放处 | FastAPI 路由函数 |
 | **Contract** | 跨进程接缝（procedure/event + schema） | 不含行为 | tRPC procedure |
 
@@ -236,58 +273,63 @@ frame 来源白名单校验 → 生命周期门禁(ready) → 输入 zod 校验
 
 ### 7.2 命名约定
 
-1. **token id 即边界**：`core.*`（集中定义于 `core/tokens.ts`）/ `modules.<mod>.*`（定义在模块内）。
+1. **token id 即边界**：`core.*`（公开能力 token 见 `core/api/tokens.ts`，内部 controller token 见 `core/kernel/tokens.ts`）/ `modules.<mod>.*`（定义在模块 `api.ts`）。
 2. **类名**：业务服务 = 接口 `XxxService` + 实现 `XxxServiceImpl`（见 §4.4）；核心部件用角色名（Manager/Router/Publisher/Logger），不带 Service 后缀。
-3. **目录即分层（六边形）**：`core/ports` 只依赖 ports；`core/` 不逃逸且零 electron；`electron/` 只 import ports；`modules/` 对 core 只经 barrel 且跨模块 import 只认 `*.service.ts`/`*.module.ts`/`*.tokens.ts`；electron 直接使用仅限适配目录与模块内 `dialog`/`BrowserWindow`。
-   以上三条由 `test/architecture.test.ts` 静态扫描固化（改结构先跑它）。
+3. **目录即分层**：`core/api` 不依赖实现侧；`core/` 不逃逸且零 electron；`electron/` 只 import api/spi；`modules/` 对 core 只经 barrel 且跨模块 import 只认对方 `api.ts`；模块是 Electron-aware 的，窗口关联类 electron API（`dialog`/`BrowserWindow`/`webContents`）可按约定直接使用。
+   以上由 `test/architecture.test.ts` 静态扫描固化（改结构先跑它）。
 
 ### 7.3 模块目录即封装边界
 
 ```
 modules/project/
-  project.module.ts     # 申报：services + routes + init（模块"封面"）
-  project.service.ts    # 接口 + token + 实现（公开接缝）
+  project.module.ts     # 申报：services + deployments + routes + init/dispose（模块"封面"，只允许组合根导入）
+  api.ts                # 跨模块公开：接口 + token（唯一跨模块入口）
+  project.service.ts    # 实现与注册工厂（模块私有）
   sqlite-store.ts       # 私有协作者：无 token，跨模块不可见
 ```
 
-- **跨模块 import 只允许指向 `*.service.ts` / `*.module.ts` / `*.tokens.ts`**（拿接口与 token）；私有协作者文件被守护测试封死。
+- **跨模块 import 只允许指向对方 `api.ts`**（拿接口与 token）；实现文件（`*.service.ts`、私有协作者）被守护测试封死，`*.module.ts` 只允许组合根导入。
 - 跨模块协作只有两条通道：**契约**（contract/appEvents）与 **token**（`ctx.services.get`）。
 - **接缝三问**（何时值得一个 token）：要跨模块共享吗？要在测试里替换吗？要运行时可选/多实现吗？——皆否则私有类直接 `new`（factory 即该服务的私有组合根）。
-- 初始化分界：**factory 内 await** = 服务自给自足的准备（打开自己的资源）；**module.init** = 特性的启动仪式（跨服务 warm-up、发初始事件）。
+- 初始化分界：**factory 内 await** = 服务自给自足的准备（打开自己的资源）；**module.init** = 特性的启动仪式（跨服务 warm-up、发初始事件）；**module.dispose(ctx)** = init 直接持有的非服务资源的对称回收（服务资源仍走服务 dispose）。
 
 ### 7.4 服务的注册、实例化与回收
 
 ```
-register（run 期）        只登记工厂，零实例化
-首次 get（惰性）           构造 + memoize（失败不缓存，可重试）
+register（build 期）       只登记工厂，零实例化（token 重复在 build 抛错）
+首次 get（惰性）           构造 + memoize（失败不缓存，可重试；并发共享同一次创建）
 dispose（唯一回收点）      关停 joiner 触发 container.dispose()
 ```
 
-**唯一回收点是应用关停**：joiner 管线（窗口先销毁、服务后 dispose）按**实例化逆序**调用 `dispose?.()`——依赖方先于被依赖方；单个失败记日志不阻断。没有运行期回收（无引用计数/空闲驱逐），服务与进程同寿命——刻意的简单性。边界情况：未实例化的服务 dispose 时是 no-op；忘写 dispose 只能靠 review（框架无法静态得知谁持资源）；进程被强杀时 joiner 不跑，持久化要按"随时可能死"设计（防抖 + 临时文件 + rename 原子写）。第二类回收（窗口级）由 P3 的 `createScope` 引入：`scope.dispose()` 随窗口关闭整支逆序释放，机制与 app 级完全同构。
+**唯一回收点是应用关停**：joiner 管线（窗口先销毁 → 模块逆序 dispose → 服务后 dispose → 部署最后终止）按**实例化逆序**调用 `dispose?.()`——依赖方先于被依赖方；单个失败记日志不阻断。没有运行期回收（无引用计数/空闲驱逐），服务与进程同寿命——刻意的简单性。边界情况：未实例化的服务 dispose 时是 no-op；忘写 dispose 只能靠 review（框架无法静态得知谁持资源）；进程被强杀时 joiner 不跑，持久化要按"随时可能死"设计（防抖 + 临时文件 + rename 原子写）。第二类回收（窗口级）由 P3 的 `createScope` 引入：`scope.dispose()` 随窗口关闭整支逆序释放，机制与 app 级完全同构。
 
 ## 8. 外部服务控制平面（deployment）
 
 桌面应用把领域重活（索引、推理、媒体处理……）放进**独立可执行的外部领域服务**（sidecar），主进程只做编排与代理——与 VS Code 的 language server、Tauri 的 sidecar/shell 同型。为此框架提供两块基础设施：
 
-- **控制平面** `DeploymentManager`（`core/deployment/manager.ts`，核心部件）：管理外部程序的启动/停止、健康探测与状态跟踪；
-- **数据平面** `ExternalServiceClient`（`core/deployment/client.ts`）：适配层服务的通用代理客户端（HTTP + WebSocket，自动等待部署就绪）。
+- **控制平面** `DeploymentManagerImpl`（`core/deployment/manager.ts`，核心部件）：外部程序的启动/停止编排、健康探测与状态跟踪。controller/readiness/admin 三个受众接口实现于**同一对象**（状态只有一份，不形成两套对象图）：
+  - **`DeploymentController`**（`core/deployment/controller.ts`，框架内部受众）：`register/startAll/stopAll`——只由内核消费，类型与 token 不从 core 公共面导出；
+  - **`DeploymentReadiness`**（`core/api/deployment.ts`）：`getStatus/whenReady/onChange`——外部服务客户端（`createExternalServiceClient`）经 `deploymentReadinessToken` 消费，不取得管理权限；
+  - **`DeploymentAdmin`**（`core/api/deployment.ts`）：`list/start/stop/restart`——deployments 管理模块经 `deploymentAdminToken` 消费，供 renderer 控制面面板使用。
+- **数据平面** `createExternalServiceClient`（`core/api/external-client.ts`）：适配层服务的通用代理客户端（HTTP + WebSocket，自动等待部署就绪），只依赖 DeploymentReadiness 受众。
 
 ```
 modules/search（适配层示例）
   ├─ search.deployment.ts   DeploymentSpec（硬编码模块变量）
+  ├─ api.ts                 SearchService 接口 + token（跨模块公开面）
   ├─ search.service.ts      SearchServiceImpl ── createExternalServiceClient ──┐
   └─ search.module.ts        deployments:[spec] + services + routes             │ HTTP/WS
                                                                              ▼
-AppModule.deployments ──→ DeploymentManager（core）── ProcessHost(端口) ──→ 外部可执行程序
+AppModule.deployments ──→ 部署控制面（core）── ProcessHost(SPI) ──→ 外部可执行程序
                               ▲  dev: DeploymentProfile 覆盖（external 模式）    (127.0.0.1)
                               └─ 状态迁移 → appEvents.deploymentChanged → renderer
 ```
 
 ### 8.1 声明与运行模式
 
-- **DeploymentSpec**（模块变量，经 `AppModule.deployments` 申报）：`id`、`command/args/env/cwd`、`baseUrl`（仅 origin）、`health`（探测路径/间隔/超时，`false` 表示不探测）、`readyTimeoutMs`、`stopTimeoutMs`。
-- **managed 模式**（缺省）：框架经 `ProcessHost` 端口（`node:child_process` 适配器）拉起进程，轮询健康端点直到就绪；stdout/stderr 按行接入应用日志；停止走 `SIGTERM → 宽限 → SIGKILL` 的优雅终止。
-- **external 模式**：进程由外部运行（dev 下由开发者手动启动），框架只做就绪探测（无上限，直到上线或被停止）。**dev profile**（`desktopApp({ deploymentProfile })`，仅 `env.isDev` 时应用）把 spec 覆盖为 external——这是「开发期等用户手动启用外部服务」的机制；打包产物恒用原始 spec。
+- **DeploymentSpec**（模块变量，经 `AppModule.deployments` 申报）：`id`、`command/args/env/cwd`、`baseUrl`（仅 origin）、`health`（探测路径/间隔/超时，`false` 表示不探测）、`readyTimeoutMs`、`stopTimeoutMs`、`required`（缺省 false，见 §8.3）。
+- **managed 模式**（缺省）：框架经 `ProcessHost` SPI（`node:child_process` 适配器）拉起进程，轮询健康端点直到就绪；stdout/stderr 按行接入应用日志；停止走 `SIGTERM → 宽限 → SIGKILL` 的优雅终止。
+- **external 模式**：进程由外部运行（dev 下由开发者手动启动），框架只做就绪探测（无上限，直到上线或被停止）。**dev profile**（`createElectronDesktopApp({ deploymentProfile })`，仅 `env.isDev` 时应用）把 spec 覆盖为 external——这是「开发期等用户手动启用外部服务」的机制；打包产物恒用原始 spec。
 
 ### 8.2 部署状态机
 
@@ -297,19 +339,22 @@ registered ──start(managed)──→ starting ──健康通过──→ ru
 starting/waiting/running 的失败出口：failed（拉起失败/就绪超时）、crashed（运行中意外退出）
 ```
 
-状态迁移经 `onChange` 订阅，由 DesktopApp 接线为 `appEvents.deploymentChanged` 广播；`deployments.list/start/stop/restart` RPC 端点（`modules/deployments`）供 renderer 的控制面面板使用。
+状态迁移经 `onChange` 订阅，由 DesktopApp 接线为 `appEvents.deploymentChanged` 广播；`deployments.list/start/stop/restart` RPC 端点（`modules/deployments`，走 admin 受众）供 renderer 的控制面面板使用。托管 `start` 序列结束仍未就绪（拉起失败/就绪超时）时以 `DeploymentStartFailedError` 表达失败，调用方（startAll/管理端点）能区分成功与失败。
 
-### 8.3 启动/关停时序（框架接线，业务不碰）
+### 8.3 启动/关停时序与 required 策略（框架接线，业务不碰）
 
 | 阶段 | 行为 |
 | --- | --- |
-| `run()` 装配期 | 注册模块申报的 DeploymentSpec（profile 在此应用）→ `startAll()`：managed 并行拉起并等待就绪（或 failed）；external 挂探测即返回 |
+| build | 校验部署 id 重复（纯声明，先于任何副作用）；控制面由**容器工厂**构造（未来可经 accessor 解析 Database 类依赖），模块申报的 spec 在工厂内注册并校验字段合法性 |
+| `run()` 启动期 | DesktopApp 解析内部 controller 并 `startAll()`：managed 并行拉起并等待就绪（或 failed）；external 挂探测即返回 |
 | 模块 init 前 | 部署已运转——适配层服务可假定控制面已开始工作（未就绪也只需等待 `whenReady`） |
-| shutdown joiner | 窗口先销毁 → 服务后 dispose → **外部进程最后终止**（dispose 期间仍可使用外部服务） |
+| shutdown joiner | 窗口先销毁 → 模块逆序 dispose → 服务后 dispose → **外部进程最后终止**（dispose 期间仍可使用外部服务） |
+
+**required 策略**（`DeploymentSpec.required`，缺省 false）：部署是否为应用启动的硬依赖必须显式表达。可选部署失败只记录状态、不阻断其余模块启动（保持 sidecar 可缺席的既有行为）；required 部署失败使 `startAll` reject（不无条件吞掉异常），应用启动进入统一回滚（见 §3）。
 
 ### 8.4 适配层服务模式（anti-corruption）
 
-外部服务的消费细节（URL、就绪等待、错误翻译、WS 重连）收敛在适配层服务里（示例 `modules/search`）：`createExternalServiceClient({ deployment, manager })` 提供 `request`（等就绪后 fetch）与 `socket`（等就绪后握手 WS）；HTTP 失败翻译为 `RpcError`，WS 推送桥接为内部事件（`appEvents.searchIndexChanged`）。内部消费方只面对普通的 `SearchService` 接口，外部服务的更迭不影响内部契约。
+外部服务的消费细节（URL、就绪等待、错误翻译、WS 重连）收敛在适配层服务里（示例 `modules/search`）：`createExternalServiceClient({ deployment, manager })` 提供 `request`（等就绪后 fetch）与 `socket`（等就绪后握手 WS）；HTTP 失败翻译为 `RpcError`，WS 推送桥接为内部事件（`appEvents.searchIndexChanged`）。内部消费方只面对普通的 `SearchService` 接口（模块 `api.ts`），外部服务的更迭不影响内部契约。
 
 ### 8.5 已知边界（刻意的 v1 简单性）
 
@@ -328,14 +373,14 @@ starting/waiting/running 的失败出口：failed（拉起失败/就绪超时）
 ## 10. 添加新业务模块（操作清单）
 
 1. **契约**：`packages/contracts/src/schemas.ts` 加 schema，`contract.ts` 加 `procedure('mod.action', In, Out)`（channel 唯一性有单测兜底）；事件加进 `appEvents`。
-2. **模块**：`apps/desktop/src/main/modules/mod/` 新建 `mod.service.ts`（接口 + token + `XxxServiceImpl`，见 §4.4）与 `mod.module.ts`（routes + init）；私有协作者放同目录独立文件（见 §7.3）。若模块接入外部领域服务，再加 `mod.deployment.ts`（DeploymentSpec 模块变量）并走适配层模式（见 §8.4）。
+2. **模块**：`apps/desktop/src/main/modules/mod/` 新建 `api.ts`（公开接口 + token，见 §4.4）、`mod.service.ts`（`XxxServiceImpl` + 注册工厂，模块私有）与 `mod.module.ts`（routes + init/dispose）；私有协作者放同目录独立文件（见 §7.3）。若模块接入外部领域服务，再加 `mod.deployment.ts`（DeploymentSpec 模块变量）并走适配层模式（见 §8.4）。
 3. **装配**：`main/index.ts` 装配脚本 `.use(modModule)` 加一行（新窗口同理 `.window(...)`）。
 4. **前端**：web 侧 `client.invoke(contract.mod.action, input)` / `client.on(appEvents.modChanged, cb)`。
 5. **测试**：服务单测（注入 MemoryLogger + 内存 sink + tmpdir），路由行为已由 router 测试覆盖通用管线；涉及启动/关停时序的改动补 `desktop-app.integration.test.ts` 断言。
 
 ## 11. 测试策略
 
-三层测试全部不依赖 Electron：**单元层**覆盖容器（惰性/memoize/循环依赖/逆序 dispose/失败重试）、生命周期（转换约束/when/joiner 顺序与容错/幂等）、路由（白名单/门禁/双向校验/RpcError/信封）、事件发布（校验丢弃）、settings 服务（持久化往返/损坏文件回退/落盘）；**集成层**（`test/desktop-app.integration.test.ts`）用 FakeHost/FakeTransport/FakeWindowHost 驱动 `desktopApp().build().run()` 跑通 `build 只装配不启动 → ready → IPC 实调 → quit → 关停管线 → exited → run() resolve` 的完整生命周期——等价于 FastAPI TestClient 驱动 lifespan 的体验；**架构守护层**（`test/architecture.test.ts`）静态扫描 import 图，把 §7.2 的分层约定固化为可执行断言（core 零 electron、core 只依赖 core、modules 不碰适配层、跨模块 import 白名单）。electron 相关薄层（host 适配、窗口管理、preload）靠 dev/package 冒烟覆盖。
+三层测试全部不依赖 Electron：**单元层**覆盖容器（并发解析：同 token 冷启动并发/独立与重叠子图/真实循环/并发后检测不坏栈/失败重试；dispose：慢工厂竞态/多个在途创建/晚到实例清理/幂等/dispose 后拒绝使用）、生命周期（转换约束/when/joiner 顺序与容错/幂等）、路由（白名单/门禁/双向校验/RpcError/信封）、事件发布（校验丢弃）、部署控制面（managed/external/profile/required 策略/优雅终止/真实进程 e2e）、外部客户端（回环 HTTP/WS）、settings 服务（持久化往返/损坏文件回退/落盘）；**集成层**（`test/desktop-app.integration.test.ts`）用 FakeHost/FakeTransport/FakeWindowController 驱动 `desktopApp().build().run()` 跑通 `build 纯声明装配与冲突校验（模块 id/服务 token/channel/窗口 id/部署 id，冲突先于副作用）→ 部署先于模块 init → ready → IPC 实调 → quit → 关停管线 → exited → run() resolve`，以及启动失败回滚（模块 init 失败、required 部署失败）——等价于 FastAPI TestClient 驱动 lifespan 的体验；**架构守护层**（`test/architecture.test.ts`）静态扫描 import 图，把 §2.2 的分层约定固化为可执行断言（core 零 electron、api 只依赖 api/spi、electron 只 import api/spi、modules 只走公共 barrel、跨模块只认 api.ts、`*.module.ts` 只允许组合根导入）。electron 相关薄层（host 适配、窗口管理、preload）靠 dev/package 冒烟覆盖。
 
 ## 12. 安全清单（对照官方 checklist）
 
@@ -349,9 +394,10 @@ starting/waiting/running 的失败出口：failed（拉起失败/就绪超时）
 ## 13. 演进路线（按需启用，不要提前建）
 
 - **窗口级作用域**：多窗口业务（如每窗口独立项目状态）时引入子容器（参照 VS Code `createChild`）+ 按 webContentsId 路由事件。
+- **窗口窄服务**：业务确有窗口操作需求时，定义只含所需方法的 WindowService token（不含 `register`/`closeAll`/主窗口重开策略）。
 - **关闭 veto 协议**：需要"有未保存数据时阻止关窗"时，参照 VS Code 逐窗口 `close` + `preventDefault` + 询问 renderer 的协议。
 - **utilityProcess 工作池**：CPU 密集/可崩溃隔离任务用 Electron `utilityProcess`（MessagePort、独立崩溃上报），封装为容器服务，dispose 时统一 kill。
 - **部署增强**：外部服务的自动重启（退避/次数上限）、external 模式的持续健康监视、tree-kill、打包形态的 extraResources 分发与资源路径解析（`process.resourcesPath` 进 AppEnv），均在接入真实外部服务时按需引入。
 - **自动更新 / 托盘**：electron-updater 的 `quitAndInstall` 与托盘"关窗不退出"都应注册为 shutdown joiner 并叠加 `isQuitting` 标志，而不是散落的 preventDefault。
-- **数据库/大状态**：settings.json 只适合小配置；结构化数据用 better-sqlite3（VS Code 与 Expo Orbit 同款选择），同样以 app 级服务 + dispose 关闭。
+- **数据库/大状态**：settings.json 只适合小配置；结构化数据用 better-sqlite3（VS Code 与 Expo Orbit 同款选择），以 app 级服务 + dispose 关闭——部署控制面的容器工厂需要它时经 accessor 解析，无需修改 DesktopApp。
 - **前端框架**：web 当前为 vanilla TS 以保持零主张；引入 React/Vue 只动 `apps/web`，契约与主进程不变。
