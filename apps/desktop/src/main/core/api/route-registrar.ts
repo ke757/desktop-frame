@@ -3,9 +3,9 @@ import type {
     ProcedureInput,
     ProcedureOutput,
 } from '@desktop-frame/contracts';
+import type { AppHandle } from './app-handle';
 import type { ServiceAccessor } from './di';
 import type { Logger } from './logger';
-import type { EventPublisher } from './event-publisher';
 import type { IpcCallInfo } from '../spi/ipc-transport';
 
 /**
@@ -15,13 +15,13 @@ import type { IpcCallInfo } from '../spi/ipc-transport';
 
 /** 每次 IPC 调用构造的上下文（请求级依赖注入，FastAPI Depends 的对应物）。 */
 export interface HandlerContext {
-    /** 本 channel 的子 logger。 */
-    readonly log: Logger;
-    /** 服务访问器（按 token 解析 app 级服务）。 */
+    /** 内核能力的受限公开面（DesktopApp 签发的 AppHandle）。 */
+    readonly app: AppHandle;
+    /** 服务访问器（按 token 解析 app 级业务/应用服务）。 */
     readonly services: ServiceAccessor;
-    /** 事件发布器。 */
-    readonly events: EventPublisher;
-    /** 调用方信息（窗口关联、来源校验已由路由完成）。 */
+    /** 当前 channel 的子 logger，不是另一个根能力入口。 */
+    readonly log: Logger;
+    /** 当前调用方信息（窗口关联；来源校验已由路由完成）。 */
     readonly sender: IpcCallInfo;
 }
 

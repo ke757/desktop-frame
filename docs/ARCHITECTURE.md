@@ -2,7 +2,7 @@
 
 本文回答四个问题：为什么需要显式生命周期管理、依赖注入如何划分作用域、IPC 层如何做到类型安全且可演进、以及文件结构如何支撑长期迭代。所有设计均标注了业界参照。
 
-> 结论先行：Electron 生态没有 FastAPI 那样的统一框架惯例。本基座以 VS Code 主进程（最大的开源 Electron 应用）的 lifecycle phase + service locator + shutdown joiner 模式为蓝本，用现代 TypeScript（异步工厂、token 类型化、zod 契约）重新实现，并用可单测的纯 TS 核心 + 薄 electron 适配层组织代码。
+> 结论先行：Electron 生态没有 FastAPI 那样的统一框架惯例。本基座以 VS Code 主进程（最大的开源 Electron 应用）的 lifecycle phase + service locator + shutdown joiner 模式为蓝本，用现代 TypeScript（异步工厂、token 类型化、zod 契约）重新实现，并用可单测的纯 TS 核心 + 薄 electron 适配层组织代码。当前能力模型：**DesktopApp 能力内核 + 业务服务容器 + 受限应用上下文（ctx.app）**（见 §2.3，规格见 `docs/CAPABILITY_KERNEL_REFACTOR_PLAN.md`）。
 
 ## 1. 调研结论（决策依据）
 
@@ -45,7 +45,7 @@
 // 也是唯一同时接触具体模块、Electron 默认装配与窗口声明的位置）
 buildDesktopApp():
   createElectronDesktopApp({ mainDir, deploymentProfile }) // Electron 默认装配工厂
-      .use(systemModule, settingsModule, deploymentsModule, searchModule)
+      .use(systemModule, settingsModule, searchModule)
       .window(createMainWindowDefinition())                 // 声明窗口
       .build();                                             // 纯声明装配，不启动
 
@@ -58,8 +58,8 @@ squirrel → 单实例锁 → buildDesktopApp() → 全局异常兜底 → .run(
 
 **阶段语义**（对齐 Tauri `build(context)` 的"does not start the application"）：
 
-- **build**：构造核心对象图；登记服务工厂、路由、窗口与部署声明；校验模块 id、service token、IPC channel、窗口 id、部署 id 的重复声明。不打开数据库、不启动 sidecar、不安装 IPC transport、不创建实际窗口、不执行模块 init——纯声明冲突在任何启动副作用之前同步抛错。
-- **run**：① 解析部署控制面、接线宿主事件并等待 `host.whenReady()` → ② 启动部署（required 失败整体 reject）→ ③ 模块 init（显式解析必须 eager 的服务）→ ④ 安装 IPC transport → ⑤ lifecycle `ready` → ⑥ 等 dev server（如适用）并打开主窗口 → ⑦ 挂起直到 `exited`。启动失败复用关停管线统一回滚后 reject，进程壳决定非零退出。
+- **build**：Builder 做声明级冲突校验并构造叶子能力（含直接构造部署控制面并登记部署声明），DesktopApp 构造函数签发 AppHandle、构造 Container/Router 并登记服务工厂、路由与窗口；校验模块 id、service token、IPC channel、窗口 id 的重复声明与部署 spec 的字段合法性。不打开数据库、不启动 sidecar、不安装 IPC transport、不创建实际窗口、不执行模块 init——纯声明冲突在任何启动副作用之前同步抛错。
+- **run**：① 接线宿主事件并等待 `host.whenReady()` → ② 启动部署（required 失败整体 reject）→ ③ 模块 init（显式解析必须 eager 的服务）→ ④ 安装 IPC transport → ⑤ lifecycle `ready` → ⑥ 等 dev server（如适用）并打开主窗口 → ⑦ 挂起直到 `exited`。启动失败复用关停管线统一回滚后 reject，进程壳决定非零退出。
 
 | Tauri v2 | 本基座 |
 | --- | --- |
@@ -68,24 +68,24 @@ squirrel → 单实例锁 → buildDesktopApp() → 全局异常兜底 → .run(
 | `App::run(cb)` 阻塞至退出 | `.run()` Promise 至 lifecycle `exited`（启动失败先回滚再 reject） |
 | `RunEvent::ExitRequested { api.prevent_exit() }` | `before-quit` preventDefault → joiner 管线 |
 | `setup(\|app\|)` 钩子 | `module.init(ctx)`（+ 对称的 `module.dispose(ctx)` = lifespan 关停段） |
-| `AppHandle::exit(code)` | `AppControl.quit()`（业务经 `appControlToken` 取用；框架自身另有 `DesktopApp.quit()`） |
+| `AppHandle::exit(code)` | `AppHandle.quit()`（DesktopApp 签发、业务经 `ctx.app.quit()` 取用；框架自身另有 `DesktopApp.quit()`） |
 
-**接线与声明的分离**是关键：核心对象的互连（lifecycle/container/windows/events/router 之间的构造注入）全部收敛在 `core/kernel/builder.ts` 的 `build()`——一次性框架代码，只在框架演进时改动且有集成测试守护；应用的高频变化（加模块、加窗口）只触碰装配脚本里的一行 `.use()` / `.window()`，不碰任何接线。核心对象间的"互含"用接口倒置消解（如 `EventPublisher` 依赖 `EventSink`/`WindowController` 接口，`WindowManager` 是其 Electron 实现），构造顺序固定为 DAG。
+**接线与声明的分离**是关键，且按 AppHandle 切成两段：Builder（`core/kernel/builder.ts` 的 `build()`）是组合根——收集声明、校验冲突、调 providers 构造叶子能力（logger/env/lifecycle/windows/events/部署控制面）后移交；DesktopApp 构造函数是唯一的句柄签发点——`createHandle()` 签发冻结委托 facade，随后构造消费句柄的 ServiceContainer 与 IpcRouter，并登记服务/路由/窗口/内置管理路由。依赖句柄的部件必须由句柄签发者接线，能力调用权因此收敛在 DesktopApp。两段都是一次性框架代码，只在框架演进时改动且有集成测试守护；应用的高频变化（加模块、加窗口）只触碰装配脚本里的一行 `.use()` / `.window()`，不碰任何接线。核心对象间的"互含"用接口倒置消解（如 `EventPublisher` 依赖 `EventSink`/`WindowController` 接口，`WindowManager` 是其 Electron 实现），构造顺序固定为 DAG。
 
 ### 2.2 目标结构与依赖方向
 
 ```
 apps/desktop/src/main/
   core/
-    api/                 # 模块作者公共 API：模块协议、上下文、公开能力、token
-    kernel/              # DesktopApp、Builder、Lifecycle、Container、内核 token
+    api/                 # 模块作者公共 API：模块协议、AppHandle、上下文、DI 词汇
+    kernel/              # DesktopApp、Builder、Lifecycle、Container
     spi/                 # HostRuntime、IpcTransport、ProcessHost、WindowController
     ipc/                 # Router、EventPublisher 实现
-    deployment/          # 部署控制面实现（controller 类型 + DeploymentManagerImpl）
+    deployment/          # 部署控制面实现（controller/admin 类型 + Manager + 内置管理路由）
     index.ts             # 只显式导出模块作者 API，不导出内部实现
   electron/              # Electron/Node 适配器 + 默认装配工厂（app-factory.ts）
   modules/
-    settings/  search/  system/  deployments/
+    settings/  search/  system/
       api.ts             # 跨模块公开：接口 + token
       *.module.ts        # 只允许组合根导入
       *.service.ts       # 实现与注册工厂，模块私有
@@ -95,11 +95,11 @@ apps/desktop/src/main/
 
 三个目录回答"接口为谁而生"：
 
-- **`core/api/`（模块作者公共 API）**：业务模块可见的一切——`AppModule`/`ModuleInitContext`/`HandlerContext`、DI 词汇（token/accessor/factory）、`Logger`/`AppEnv`/`EventPublisher`/`RouteRegistrar`、`AppControl`、`LifecycleView`（只读）、部署数据契约与受众接口（`DeploymentReadiness`/`DeploymentAdmin`）、`createExternalServiceClient`、公开能力 token。不依赖 kernel/ipc/deployment 实现或 Electron。
+- **`core/api/`（模块作者公共 API）**：业务模块可见的一切——`AppModule`/`ModuleInitContext`/`HandlerContext`、受限应用句柄 `AppHandle`、DI 词汇（token/ServiceFactoryContext/ServiceAccessor）、`Logger`/`AppEnv`/`EventPublisher`/`RouteRegistrar`、`LifecycleView`（只读）、部署数据契约与就绪受众（`DeploymentReadiness`）、`createExternalServiceClient`。不依赖 kernel/ipc/deployment 实现或 Electron；**本目录不定义任何 token**。
 - **`core/spi/`（宿主适配接缝，SPI）**：只有真实由 Electron/Node/OS 适配器实现的接缝——`HostRuntime`（electron `app`）、`IpcTransport`（ipcMain）、`ProcessHost`（node:child_process）、`WindowController`/`WindowDefinition`/`EventSink`（BrowserWindow）。框架专用能力（宿主事件订阅、`exit()`、`closeAll`）只在此层，不对业务公开。
-- **`core/kernel/`（内核实现）**：`DesktopApp`、`DesktopAppBuilder`、`ServiceContainer`、`Lifecycle`、`MemoryLogger`/`ConsoleLogger`、`resolveEnv`、内部 token（进程宿主、部署控制面 controller）。逻辑内核 = DesktopApp + Lifecycle + Container + 模块激活 + IpcRouter + 启动/关停编排——**不设 Kernel 总控对象**，DesktopApp 仍是唯一的应用生命周期所有者。
+- **`core/kernel/`（内核实现）**：`DesktopApp`、`DesktopAppBuilder`、`ServiceContainer`、`Lifecycle`、`MemoryLogger`/`ConsoleLogger`、`resolveEnv`。逻辑内核 = DesktopApp + Lifecycle + Container + 模块激活 + IpcRouter + 启动/关停编排——**不设 Kernel 总控对象**，DesktopApp 仍是唯一的应用生命周期所有者。
 
-**不进入以上任何分类的东西**：Module、Route、WindowDefinition、DeploymentSpec 是声明，不是服务；是否进入 container、是否参与 App 启动流程、是否向业务公开是三个独立决策——需要跨模块共享/替换/统一回收的应用级对象进 container；固定且业务不可替换的框架机制由 builder 直接构造注入；模块私有协作者由服务工厂直接 `new`。服务默认 lazy，必须在 ready 前就绪的由模块 init 显式解析。Database 类普通基础设施可作为普通容器服务存在，无需修改 DesktopApp——部署控制面的容器工厂需要它时经 accessor 自然解析。
+**不进入以上任何分类的东西**：Module、Route、WindowDefinition、DeploymentSpec 是声明，不是服务；是否进入 container、是否参与 App 启动流程、是否向业务公开是三个独立决策——需要跨模块共享/替换/统一回收的**业务与应用服务**进 container；固定且业务不可替换的框架机制（内核能力与宿主运行时）由 builder/DesktopApp 直接构造注入；模块私有协作者由服务工厂直接 `new`。服务默认 lazy，必须在 ready 前就绪的由模块 init 显式解析。Database 类普通基础设施仍可作为普通容器服务存在，无需修改 DesktopApp——业务服务工厂经 `ctx.services` 解析它即可。
 
 electron 适配器与 SPI 一一对应：
 
@@ -121,6 +121,29 @@ core 内部实现（Logger/MemoryLogger、EventPublisher、RouteRegistrar、Depl
 5. `modules/**` 对 core 只经 barrel `core/index.ts` 导入，不深层导入 kernel、ipc 或 deployment 实现；跨模块 import 只允许指向对方 `api.ts`；`*.module.ts` 只允许组合根导入。
 6. `main/index.ts`（组合根）是唯一可以同时接触具体模块、Electron 默认装配和窗口声明的位置；`src/main.ts`/`src/preload.ts` 是仅有的两个构建入口。
 
+### 2.3 能力所有权：DesktopApp 能力内核 + 业务 Container + ctx.app
+
+所有业务接触点遵循同一条依赖模型（取代早期"内核能力 token 化"方案）：
+
+```text
+ctx.app       内核能力：env / logger / events / lifecycle / deployments / quit
+ctx.services  业务服务：settings / search / database / repository ...
+```
+
+- **DesktopApp 直接持有全部内核能力与宿主运行时**：固定机制（Lifecycle、ServiceContainer、IpcRouter、模块激活）、内核能力（Logger、AppEnv、EventPublisher、Deployment 控制面、WindowController）、宿主运行时（HostRuntime、IpcTransport、ProcessHost）。这些对象不注册进业务 Container。
+- **组装按 AppHandle 切成两段**：Builder 是组合根——收集声明、做声明级校验、调 providers 构造**叶子能力**后移交；DesktopApp 构造函数是**唯一的句柄签发点**——先 `createHandle()`，再构造消费句柄的 Container/Router，最后登记服务/路由/窗口/内置管理路由。Builder 不签发句柄、不接线依赖句柄的部件。
+- **Container 只管理业务与应用服务**：`defineService` 登记的 token 全部是业务/应用服务；容器构造时接收 AppHandle 与 Logger 作为框架依赖（构造注入），不代表内核能力被登记为服务。**不存在任何内核能力 token**（env/logger/events/appControl/deployment 均无）。
+- **`ctx.app` 是冻结的委托 `AppHandle`，不是 DesktopApp**：env 为只读冻结快照；logger/events 是转发回调；lifecycle/deployments 是运行时窄面 wrapper（完整 `Lifecycle` 的 `transition/shutdown/onShutdown` 与 `DeploymentManager` 的 `start/stop/restart/list/register/startAll/stopAll` 都不在对象上，不只是类型窄面）；`quit()` 收敛到 DesktopApp 的受控入口（shuttingDown/exited 后 no-op，其余状态走 before-quit 与统一优雅关停，不是 `host.exit()`）。
+- 三类接触点统一签名：模块 init/dispose 与服务工厂是 `{ app, services }`（工厂上下文类型 `ServiceFactoryContext`），IPC handler 是 `{ app, services, log, sender }`（`log` 是 channel 子 logger）。IpcRouter 内部直接消费 AppHandle 完成来源校验、门禁与日志。
+- **内核能力不反向依赖业务服务**：Deployment 等内核能力只依赖其他内核能力与 SPI；业务相关策略放业务模块/适配层服务，不让内核解析任意业务 token。
+
+生命周期清理顺序（所有权调整后保持不变）：
+
+```text
+停止接受新调用 → 关闭窗口 → 模块逆序 dispose → 业务 Container dispose
+→ 部署 stopAll（DesktopApp 显式调用，不经容器）→ 内核能力收尾
+```
+
 ## 3. 生命周期状态机（`core/kernel/lifecycle.ts`）
 
 ```
@@ -137,7 +160,7 @@ Electron 原生事件到状态机的映射（`core/kernel/desktop-app.ts` 的 `D
 
 | Electron 事件 | 行为 |
 | --- | --- |
-| `app.whenReady` | 解析部署控制面并 `startAll()` → 模块 init → 安装路由 → `ready` → 打开主窗口 → 挂起等待 `exited` |
+| `app.whenReady` | 部署控制面 `startAll()`（build 期已构造）→ 模块 init → 安装路由 → `ready` → 打开主窗口 → 挂起等待 `exited` |
 | `before-quit` | `preventDefault()` → `lifecycle.shutdown()`（窗口先关、模块逆序 dispose、服务后 dispose、部署最后终止）→ `host.exit(0)` |
 | `window-all-closed` | 非 macOS `quit()`（macOS 留 Dock，`activate` 重开窗口） |
 | `second-instance` | 聚焦已有主窗口（单实例锁在 `main.ts` 进程壳检查） |
@@ -155,8 +178,8 @@ Electron 原生事件到状态机的映射（`core/kernel/desktop-app.ts` 的 `D
 
 | FastAPI | 本基座 | 说明 |
 | --- | --- | --- |
-| `lifespan` 管理的 app 级依赖（如 db） | `ServiceContainer` + `defineService(token, factory)` | 异步工厂、惰性实例化、memoize、逆序 dispose |
-| `Depends` 注入的请求级依赖 | `HandlerContext`（每次 IPC 调用构造） | 含 `services`/`log`/`events`/`sender`，随调用结束即弃 |
+| `lifespan` 管理的 app 级依赖（如 db） | `ServiceContainer` + `defineService(token, factory)` | 异步工厂、惰性实例化、memoize、逆序 dispose；只装业务与应用服务 |
+| `Depends` 注入的请求级依赖 | `HandlerContext`（每次 IPC 调用构造） | 含 `app`/`services`/`log`/`sender`，随调用结束即弃 |
 | —（无对应） | 窗口级作用域 | 演进方向：多窗口时用子容器（见 §13） |
 
 ### 4.2 设计要点
@@ -171,10 +194,15 @@ Electron 原生事件到状态机的映射（`core/kernel/desktop-app.ts` 的 `D
 ### 4.3 三种获得依赖的方式
 
 ```ts
-// 1) 服务工厂内声明依赖（app 级）
-export const settingsService = defineService(settingsToken, async (acc) => {
-  const env = await acc.get(envToken);
-  ...
+// 1) 服务工厂内声明依赖：业务服务经 ctx.services，内核能力经 ctx.app
+export const settingsService = defineService(settingsToken, async (ctx) => {
+  const impl = new SettingsServiceImpl(
+    path.join(ctx.app.env.userDataPath, 'settings.json'),
+    ctx.app.logger.child('settings'),
+    ctx.app.events,
+  );
+  await impl.load();
+  return impl;
 });
 
 // 2) handler 内按调用取（请求级，FastAPI Depends 的对应物）
@@ -183,7 +211,8 @@ registrar.handle(contract.settings.getAll, async (ctx) => {
   return settings.get();
 });
 
-// 3) 框架层（builder/DesktopApp 直接持有核心对象引用，无需容器）
+// 3) 框架层（builder/DesktopApp 直接持有核心对象引用，无需容器；
+//    业务经 ctx.app 拿到的是受限门面，不是这些内核对象本体）
 ```
 
 ### 4.4 接口化 token：公开面与框架钩子分离
@@ -208,7 +237,7 @@ export class SettingsServiceImpl implements SettingsService, DisposableService {
 - **框架钩子**（`DisposableService.dispose`）：受众是容器，**独占调用**。dispose 刻意不进公开接口——否则任何 handler 都能把别人的服务释放掉。
 - 实现类缺省命名 `XxxServiceImpl`（实现有更贴切的角色名时可用，如 `JsonFileStore`）；模块内部独享、不经 token 暴露的服务可省略接口。
 
-**不做 FastAPI Depends 式自动注入**（刻意决策）：自动签名分析需要装饰器/reflect-metadata（VS Code 为此自写 TS transform），换来的是魔法反射与更差的报错，省去的只是一行 `acc.get()`；我们的服务是单次组合的 app 级单例，factory + accessor 就是组合语言（且 `CyclicDependencyError` 带完整链路）。FastAPI 使用经验里感到"缺"的其实是作用域（P3 的 `createScope`），不是自动注入。
+**不做 FastAPI Depends 式自动注入**（刻意决策）：自动签名分析需要装饰器/reflect-metadata（VS Code 为此自写 TS transform），换来的是魔法反射与更差的报错，省去的只是一行 `ctx.services.get()`；我们的服务是单次组合的 app 级单例，factory + scoped accessor 就是组合语言（且 `CyclicDependencyError` 带完整链路）。FastAPI 使用经验里感到"缺"的其实是作用域（P3 的 `createScope`），不是自动注入。
 
 ## 5. 类型安全 IPC（`core/ipc/` + `packages/contracts`）
 
@@ -269,11 +298,11 @@ frame 来源白名单校验 → 生命周期门禁(ready) → 输入 zod 校验
 | **Handler/Route** | 无状态调用端点（状态放服务） | 不是依赖存放处 | FastAPI 路由函数 |
 | **Contract** | 跨进程接缝（procedure/event + schema） | 不含行为 | tRPC procedure |
 
-三条判断轴：Service vs Module（运行时节点 vs 声明期申报）；Service vs Handler（状态要活过本次调用吗）；业务服务 vs 核心部件（`modules.*` 惰性异步 / `core.*` 内置同步）。
+三条判断轴：Service vs Module（运行时节点 vs 声明期申报）；Service vs Handler（状态要活过本次调用吗）；业务服务 vs 核心部件（业务服务 `modules.*` 惰性异步、可经 token 解析；核心部件内核直连，经 `ctx.app` 只见窄面）。
 
 ### 7.2 命名约定
 
-1. **token id 即边界**：`core.*`（公开能力 token 见 `core/api/tokens.ts`，内部 controller token 见 `core/kernel/tokens.ts`）/ `modules.<mod>.*`（定义在模块 `api.ts`）。
+1. **token id 即边界**：业务与应用服务的 token 用 `modules.<mod>.*` 命名空间（定义在模块 `api.ts`）；`core.*` 命名空间不再用于 token——内核能力没有 token，统一经 `ctx.app` 分发（守护测试扫描已删除 token 的任何残留引用）。
 2. **类名**：业务服务 = 接口 `XxxService` + 实现 `XxxServiceImpl`（见 §4.4）；核心部件用角色名（Manager/Router/Publisher/Logger），不带 Service 后缀。
 3. **目录即分层**：`core/api` 不依赖实现侧；`core/` 不逃逸且零 electron；`electron/` 只 import api/spi；`modules/` 对 core 只经 barrel 且跨模块 import 只认对方 `api.ts`；模块是 Electron-aware 的，窗口关联类 electron API（`dialog`/`BrowserWindow`/`webContents`）可按约定直接使用。
    以上由 `test/architecture.test.ts` 静态扫描固化（改结构先跑它）。
@@ -307,10 +336,10 @@ dispose（唯一回收点）      关停 joiner 触发 container.dispose()
 
 桌面应用把领域重活（索引、推理、媒体处理……）放进**独立可执行的外部领域服务**（sidecar），主进程只做编排与代理——与 VS Code 的 language server、Tauri 的 sidecar/shell 同型。为此框架提供两块基础设施：
 
-- **控制平面** `DeploymentManagerImpl`（`core/deployment/manager.ts`，核心部件）：外部程序的启动/停止编排、健康探测与状态跟踪。controller/readiness/admin 三个受众接口实现于**同一对象**（状态只有一份，不形成两套对象图）：
-  - **`DeploymentController`**（`core/deployment/controller.ts`，框架内部受众）：`register/startAll/stopAll`——只由内核消费，类型与 token 不从 core 公共面导出；
-  - **`DeploymentReadiness`**（`core/api/deployment.ts`）：`getStatus/whenReady/onChange`——外部服务客户端（`createExternalServiceClient`）经 `deploymentReadinessToken` 消费，不取得管理权限；
-  - **`DeploymentAdmin`**（`core/api/deployment.ts`）：`list/start/stop/restart`——deployments 管理模块经 `deploymentAdminToken` 消费，供 renderer 控制面面板使用。
+- **控制平面** `DeploymentManagerImpl`（`core/deployment/manager.ts`，核心部件；builder 直接构造，不经业务容器）：外部程序的启动/停止编排、健康探测与状态跟踪。controller/readiness/admin 三个受众接口实现于**同一对象**（状态只有一份，不形成两套对象图），按受众分发：
+  - **`DeploymentController`**（`core/deployment/controller.ts`，框架内部受众）：`register/startAll/stopAll`——只由 DesktopApp 消费（启动/关停时序），类型不从 core 公共面导出；
+  - **`DeploymentReadiness`**（`core/api/deployment.ts`）：`getStatus/whenReady/onChange`——外部服务客户端（`createExternalServiceClient`）与业务接触点经 `ctx.app.deployments` 消费，不取得管理权限；
+  - **`DeploymentAdmin`**（`core/deployment/controller.ts`，框架内部受众）：`list/start/stop/restart`——只被 **deployments 管理 RPC 的框架内置路由**（`core/deployment/admin-routes.ts`，DesktopApp 在构造期接线）消费，供 renderer 控制面面板使用。Admin 不进入 AppHandle，也不作为 token 公开——普通业务模块无法经公共面取得管理权限。
 - **数据平面** `createExternalServiceClient`（`core/api/external-client.ts`）：适配层服务的通用代理客户端（HTTP + WebSocket，自动等待部署就绪），只依赖 DeploymentReadiness 受众。
 
 ```
@@ -339,22 +368,22 @@ registered ──start(managed)──→ starting ──健康通过──→ ru
 starting/waiting/running 的失败出口：failed（拉起失败/就绪超时）、crashed（运行中意外退出）
 ```
 
-状态迁移经 `onChange` 订阅，由 DesktopApp 接线为 `appEvents.deploymentChanged` 广播；`deployments.list/start/stop/restart` RPC 端点（`modules/deployments`，走 admin 受众）供 renderer 的控制面面板使用。托管 `start` 序列结束仍未就绪（拉起失败/就绪超时）时以 `DeploymentStartFailedError` 表达失败，调用方（startAll/管理端点）能区分成功与失败。
+状态迁移经 `onChange` 订阅，由 DesktopApp 接线为 `appEvents.deploymentChanged` 广播；`deployments.list/start/stop/restart` RPC 端点是**框架内置路由**（builder 接线，走 admin 受众，业务模块不参与）供 renderer 的控制面面板使用。托管 `start` 序列结束仍未就绪（拉起失败/就绪超时）时以 `DeploymentStartFailedError` 表达失败，调用方（startAll/管理端点）能区分成功与失败。
 
 ### 8.3 启动/关停时序与 required 策略（框架接线，业务不碰）
 
 | 阶段 | 行为 |
 | --- | --- |
-| build | 校验部署 id 重复（纯声明，先于任何副作用）；控制面由**容器工厂**构造（未来可经 accessor 解析 Database 类依赖），模块申报的 spec 在工厂内注册并校验字段合法性 |
-| `run()` 启动期 | DesktopApp 解析内部 controller 并 `startAll()`：managed 并行拉起并等待就绪（或 failed）；external 挂探测即返回 |
+| build | 部署 id 重复校验（纯声明）+ 控制面**内核直接构造**并登记模块申报的 spec（字段合法性同步校验，非法/重复都在 build 抛错、先于任何副作用）；同时登记 deployments 管理 RPC 内置路由 |
+| `run()` 启动期 | DesktopApp 调用内部 controller 的 `startAll()`：managed 并行拉起并等待就绪（或 failed）；external 挂探测即返回 |
 | 模块 init 前 | 部署已运转——适配层服务可假定控制面已开始工作（未就绪也只需等待 `whenReady`） |
-| shutdown joiner | 窗口先销毁 → 模块逆序 dispose → 服务后 dispose → **外部进程最后终止**（dispose 期间仍可使用外部服务） |
+| shutdown joiner | 窗口先销毁 → 模块逆序 dispose → 服务后 dispose → **外部进程最后终止**（DesktopApp 显式 `stopAll()`，不经容器；dispose 期间仍可使用外部服务） |
 
 **required 策略**（`DeploymentSpec.required`，缺省 false）：部署是否为应用启动的硬依赖必须显式表达。可选部署失败只记录状态、不阻断其余模块启动（保持 sidecar 可缺席的既有行为）；required 部署失败使 `startAll` reject（不无条件吞掉异常），应用启动进入统一回滚（见 §3）。
 
 ### 8.4 适配层服务模式（anti-corruption）
 
-外部服务的消费细节（URL、就绪等待、错误翻译、WS 重连）收敛在适配层服务里（示例 `modules/search`）：`createExternalServiceClient({ deployment, manager })` 提供 `request`（等就绪后 fetch）与 `socket`（等就绪后握手 WS）；HTTP 失败翻译为 `RpcError`，WS 推送桥接为内部事件（`appEvents.searchIndexChanged`）。内部消费方只面对普通的 `SearchService` 接口（模块 `api.ts`），外部服务的更迭不影响内部契约。
+外部服务的消费细节（URL、就绪等待、错误翻译、WS 重连）收敛在适配层服务里（示例 `modules/search`）：服务工厂经 `ctx.app.deployments` 取得就绪受众，`createExternalServiceClient({ deployment, manager })` 提供 `request`（等就绪后 fetch）与 `socket`（等就绪后握手 WS）；HTTP 失败翻译为 `RpcError`，WS 推送桥接为内部事件（`appEvents.searchIndexChanged`）。内部消费方只面对普通的 `SearchService` 接口（模块 `api.ts`），外部服务的更迭不影响内部契约。
 
 ### 8.5 已知边界（刻意的 v1 简单性）
 
@@ -380,7 +409,7 @@ starting/waiting/running 的失败出口：failed（拉起失败/就绪超时）
 
 ## 11. 测试策略
 
-三层测试全部不依赖 Electron：**单元层**覆盖容器（并发解析：同 token 冷启动并发/独立与重叠子图/真实循环/并发后检测不坏栈/失败重试；dispose：慢工厂竞态/多个在途创建/晚到实例清理/幂等/dispose 后拒绝使用）、生命周期（转换约束/when/joiner 顺序与容错/幂等）、路由（白名单/门禁/双向校验/RpcError/信封）、事件发布（校验丢弃）、部署控制面（managed/external/profile/required 策略/优雅终止/真实进程 e2e）、外部客户端（回环 HTTP/WS）、settings 服务（持久化往返/损坏文件回退/落盘）；**集成层**（`test/desktop-app.integration.test.ts`）用 FakeHost/FakeTransport/FakeWindowController 驱动 `desktopApp().build().run()` 跑通 `build 纯声明装配与冲突校验（模块 id/服务 token/channel/窗口 id/部署 id，冲突先于副作用）→ 部署先于模块 init → ready → IPC 实调 → quit → 关停管线 → exited → run() resolve`，以及启动失败回滚（模块 init 失败、required 部署失败）——等价于 FastAPI TestClient 驱动 lifespan 的体验；**架构守护层**（`test/architecture.test.ts`）静态扫描 import 图，把 §2.2 的分层约定固化为可执行断言（core 零 electron、api 只依赖 api/spi、electron 只 import api/spi、modules 只走公共 barrel、跨模块只认 api.ts、`*.module.ts` 只允许组合根导入）。electron 相关薄层（host 适配、窗口管理、preload）靠 dev/package 冒烟覆盖。
+三层测试全部不依赖 Electron：**单元层**覆盖容器（并发解析：同 token 冷启动并发/独立与重叠子图/真实循环/并发后检测不坏栈/失败重试；dispose：慢工厂竞态/多个在途创建/晚到实例清理/幂等/dispose 后拒绝使用；工厂上下文：同一 AppHandle/scoped 循环检测不退化/内核能力不在注册表）、生命周期（转换约束/when/joiner 顺序与容错/幂等）、路由（白名单/门禁/双向校验/RpcError/信封/ctx.app 接线）、事件发布（校验丢弃）、部署控制面（managed/external/profile/required 策略/优雅终止/真实进程 e2e）、外部客户端（回环 HTTP/WS）、settings 服务（持久化往返/损坏文件回退/落盘）；**集成层**（`test/desktop-app.integration.test.ts`）用 FakeHost/FakeTransport/FakeWindowController 驱动 `desktopApp().build().run()` 跑通 `build 纯声明装配与冲突校验（模块 id/服务 token/channel/窗口 id/部署 spec，冲突先于副作用）→ 部署先于模块 init → ready → IPC 实调（含内置 deployments 管理路由与错误翻译）→ quit → 关停管线 → exited → run() resolve`，以及启动失败回滚（模块 init 失败、required 部署失败）、ctx.app 受限面（模块 init 只见六成员门面）——等价于 FastAPI TestClient 驱动 lifespan 的体验；**架构守护层**（`test/architecture.test.ts`）静态扫描 import 图，把 §2.2 的分层约定与 §2.3 能力边界固化为可执行断言（core 零 electron、api 只依赖 api/spi、electron 只 import api/spi、modules 只走公共 barrel、跨模块只认 api.ts、`*.module.ts` 只允许组合根导入、无内核能力 token 残留、api 公共面无 token 注册、DeploymentAdmin 不经 api 导出）。electron 相关薄层（host 适配、窗口管理、preload）靠 dev/package 冒烟覆盖。
 
 ## 12. 安全清单（对照官方 checklist）
 
@@ -399,5 +428,5 @@ starting/waiting/running 的失败出口：failed（拉起失败/就绪超时）
 - **utilityProcess 工作池**：CPU 密集/可崩溃隔离任务用 Electron `utilityProcess`（MessagePort、独立崩溃上报），封装为容器服务，dispose 时统一 kill。
 - **部署增强**：外部服务的自动重启（退避/次数上限）、external 模式的持续健康监视、tree-kill、打包形态的 extraResources 分发与资源路径解析（`process.resourcesPath` 进 AppEnv），均在接入真实外部服务时按需引入。
 - **自动更新 / 托盘**：electron-updater 的 `quitAndInstall` 与托盘"关窗不退出"都应注册为 shutdown joiner 并叠加 `isQuitting` 标志，而不是散落的 preventDefault。
-- **数据库/大状态**：settings.json 只适合小配置；结构化数据用 better-sqlite3（VS Code 与 Expo Orbit 同款选择），以 app 级服务 + dispose 关闭——部署控制面的容器工厂需要它时经 accessor 解析，无需修改 DesktopApp。
+- **数据库/大状态**：settings.json 只适合小配置；结构化数据用 better-sqlite3（VS Code 与 Expo Orbit 同款选择），以 app 级服务 + dispose 关闭——需要它的业务服务工厂经 `ctx.services` 解析即可，内核能力保持不反向依赖业务服务，无需修改 DesktopApp。
 - **前端框架**：web 当前为 vanilla TS 以保持零主张；引入 React/Vue 只动 `apps/web`，契约与主进程不变。

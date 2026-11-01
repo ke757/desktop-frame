@@ -2,6 +2,15 @@ import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import type { AppEnv } from '../src/main/core';
+import type { AppHandle } from '../src/main/core';
+import type {
+    DeploymentChange,
+    DeploymentReadiness,
+    DeploymentStatus,
+} from '../src/main/core';
+import { EventPublisherImpl } from '../src/main/core/ipc/events';
+import { Lifecycle } from '../src/main/core/kernel/lifecycle';
+import { MemoryLogger } from '../src/main/core/kernel/logging';
 import type {
     HostedProcess,
     ProcessExit,
@@ -10,9 +19,10 @@ import type {
 } from '../src/main/core/spi/process-host';
 
 /**
- * 部署相关测试的共享替身：假进程宿主（记录 kill/spawn）、最小 AppEnv、
- * 真实回环 HTTP 健康服务与轮询等待工具。被 deployment-manager /
- * external-client / deployment.e2e / desktop-app.integration 四组测试复用。
+ * 部署与容器相关测试的共享替身：假进程宿主（记录 kill/spawn）、最小
+ * AppEnv/AppHandle、空的部署就绪面、真实回环 HTTP 健康服务与轮询等待
+ * 工具。被 deployment-manager / external-client / deployment.e2e /
+ * desktop-app.integration / container / router 多组测试复用。
  */
 
 let nextFakePid = 4200;
@@ -74,9 +84,9 @@ export class FakeProcessHost implements ProcessHost {
     }
 }
 
-/** 构造最小可用的 AppEnv（测试默认非 dev、file 入口）。 */
-export function makeEnv(isDev: boolean): AppEnv {
-    return {
+/** 构造最小可用的 AppEnv（测试默认非 dev、file 入口；与内核一致地冻结）。 */
+export function makeEnv(isDev: boolean): Readonly<AppEnv> {
+    return Object.freeze({
         isDev,
         isPackaged: !isDev,
         devServerUrl: isDev ? 'http://localhost:5173' : undefined,
@@ -86,9 +96,12 @@ export function makeEnv(isDev: boolean): AppEnv {
         userDataPath: '/tmp/df-test-user-data',
         mainDir: '/tmp/df-test-main',
         preloadPath: '/tmp/df-test-main/preload.cjs',
-        rendererEntry: { kind: 'file', path: '/tmp/df-test-main/index.html' },
-        allowedFrameOrigins: ['file://'],
-    };
+        rendererEntry: Object.freeze({
+            kind: 'file',
+            path: '/tmp/df-test-main/index.html',
+        }),
+        allowedFrameOrigins: Object.freeze(['file://']),
+    });
 }
 
 /** 起一个回环 HTTP 服务：/health 返回 200，其余 404。 */
@@ -135,4 +148,42 @@ export async function waitUntil(
         if (Date.now() > deadline) throw new Error('waitUntil timed out');
         await new Promise((resolve) => setTimeout(resolve, 10));
     }
+}
+
+/** 空的部署就绪替身：无注册部署，只满足 DeploymentReadiness 形状。 */
+export class FakeReadiness implements DeploymentReadiness {
+    /** 无注册部署：任何 id 都未知。 */
+    getStatus(): DeploymentStatus | undefined {
+        return undefined;
+    }
+
+    /** 未知 id 直接以 NotReady 语义 reject。 */
+    whenReady(id: string): Promise<void> {
+        return Promise.reject(new Error(`unknown deployment: ${id}`));
+    }
+
+    /** 无状态迁移：订阅返回空退订函数。 */
+    onChange(_listener: (change: DeploymentChange) => void): () => void {
+        return () => {};
+    }
+}
+
+/** 构造测试用受限应用句柄（内核能力组合的内存实现，可用 overrides 覆盖）。 */
+export function makeAppHandle(overrides: Partial<AppHandle> = {}): AppHandle {
+    const logger = new MemoryLogger();
+    const events = new EventPublisherImpl(
+        {
+            send: (_channel: string, _payload: unknown) => {},
+        },
+        logger,
+    );
+    return {
+        env: makeEnv(false),
+        logger,
+        events,
+        lifecycle: new Lifecycle(logger.child('lifecycle')),
+        deployments: new FakeReadiness(),
+        quit: () => {},
+        ...overrides,
+    };
 }

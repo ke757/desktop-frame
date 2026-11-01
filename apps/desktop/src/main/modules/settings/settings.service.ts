@@ -7,13 +7,7 @@ import {
     type SettingsPatch,
 } from '@desktop-frame/contracts';
 import type { EventPublisher, Logger } from '../../core';
-import {
-    defineService,
-    envToken,
-    eventsToken,
-    loggerToken,
-    type DisposableService,
-} from '../../core';
+import { defineService, type DisposableService } from '../../core';
 import { settingsToken, type SettingsService } from './api';
 
 /** 防抖落盘间隔（ms）。 */
@@ -102,14 +96,13 @@ export class SettingsServiceImpl implements SettingsService, DisposableService {
 }
 
 /** 设置服务的注册定义：组装依赖并在工厂内完成异步加载。 */
-export const settingsService = defineService(settingsToken, async (accessor) => {
-    const env = await accessor.get(envToken);
-    const logger = await accessor.get(loggerToken);
-    const events = await accessor.get(eventsToken);
+export const settingsService = defineService(settingsToken, async (ctx) => {
+    // 内核能力经 ctx.app（受限应用上下文）获取：env 定路径、logger/events
+    // 构造实现；本工厂无业务服务依赖，不使用 ctx.services。
     const impl = new SettingsServiceImpl(
-        path.join(env.userDataPath, 'settings.json'),
-        logger.child('settings'),
-        events,
+        path.join(ctx.app.env.userDataPath, 'settings.json'),
+        ctx.app.logger.child('settings'),
+        ctx.app.events,
     );
     await impl.load();
     return impl;

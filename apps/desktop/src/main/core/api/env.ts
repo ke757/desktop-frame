@@ -1,10 +1,12 @@
 /**
  * 环境 API：描述运行环境的只读数据契约（应用信息经它向业务公开）。
- * 由 core/kernel/env.ts 的 resolveEnv 从 HostRuntime 解析产出；适配器
- * （窗口管理器）与业务（envToken）共同消费。
+ * 由 core/kernel/env.ts 的 resolveEnv 从 HostRuntime 解析并冻结产出；
+ * 适配器（窗口管理器）与业务（经 ctx.app.env）共同消费。
  */
 
-export type RendererEntry = { kind: 'url'; url: string } | { kind: 'file'; path: string };
+export type RendererEntry =
+    | { readonly kind: 'url'; readonly url: string }
+    | { readonly kind: 'file'; readonly path: string };
 
 export interface AppEnv {
     /** 是否开发模式（未打包）。 */
@@ -25,11 +27,11 @@ export interface AppEnv {
     readonly mainDir: string;
     /** preload 脚本路径。 */
     readonly preloadPath: string;
-    /** renderer 加载入口（dev URL / 打包文件）。 */
-    rendererEntry: RendererEntry;
+    /** renderer 加载入口（dev URL / 打包文件；冻结快照）。 */
+    readonly rendererEntry: Readonly<RendererEntry>;
     /**
      * 允许调用特权 IPC 的 frame 来源白名单：
-     * dev 为 web dev server origin，打包后仅 file://。
+     * dev 为 web dev server origin，打包后仅 file://（冻结数组）。
      */
-    allowedFrameOrigins: readonly string[];
+    readonly allowedFrameOrigins: readonly string[];
 }

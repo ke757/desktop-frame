@@ -2,13 +2,19 @@ import type {
     DisposableService,
     ServiceAccessor,
     ServiceFactory,
+    ServiceFactoryContext,
     ServiceRegistration,
     ServiceToken,
 } from '../api/di';
+import type { AppHandle } from '../api/app-handle';
 import type { Logger } from '../api/logger';
 
 /**
  * 轻量异步服务容器（内核部件，模块作者经 api/di 的词汇使用它）。
+ *
+ * 职责边界：容器只管理**业务与应用服务**（模块/组合根申报的 token）——
+ * Logger、AppEnv、EventPublisher、Deployment 等内核能力由 DesktopApp 持有，
+ * 不在这里登记；工厂经构造注入的 AppHandle（`ctx.app`）使用内核能力。
  *
  * 设计要点（与大型 Electron 代码库的收敛实践对齐）：
  * - 服务以类型化 token 标识，首次 `get` 时才惰性实例化并 memoize；
@@ -59,7 +65,15 @@ export class ServiceContainer implements ServiceAccessor {
     /** 唯一的 dispose promise（幂等；并发 dispose 共享同一次清理）。 */
     private disposePromise: Promise<void> | undefined;
 
-    constructor(private readonly logger?: Logger) {}
+    /**
+     * @param app DesktopApp 签发的受限应用句柄（传给每个工厂的 `ctx.app`，
+     *            构造注入的框架依赖，不代表内核能力被登记为服务）。
+     * @param logger 容器自身的日志（dispose 失败记录用）。
+     */
+    constructor(
+        private readonly app: AppHandle,
+        private readonly logger?: Logger,
+    ) {}
 
     /** 注册服务（重复注册同 id 抛错）；dispose 开始后不可再注册。 */
     register<T>(registration: ServiceRegistration<T>): this {
@@ -154,18 +168,21 @@ export class ServiceContainer implements ServiceAccessor {
     }
 
     /**
-     * 执行工厂创建实例。传给工厂的 accessor 携带本上下文的祖先链
-     * （含自身），依赖解析据此做单次上下文内的循环检测。
+     * 执行工厂创建实例。传给工厂的上下文携带：内核能力（`app`，构造注入
+     * 的同一 AppHandle）与业务服务访问器（`services`，携带本上下文祖先
+     * 链的 scoped accessor——含自身，依赖解析据此做单次上下文内的循环
+     * 检测；不因传 AppHandle 退回全容器共享链）。
      */
     private async create<T>(
         token: ServiceToken<T>,
         factory: ServiceFactory<unknown>,
         chain: readonly string[],
     ): Promise<T> {
-        const scopedAccessor: ServiceAccessor = {
+        const services: ServiceAccessor = {
             get: <R>(dependency: ServiceToken<R>) => this.resolve(dependency, chain),
         };
-        const instance = await factory(scopedAccessor);
+        const factoryCtx: ServiceFactoryContext = { app: this.app, services };
+        const instance = await factory(factoryCtx);
         this.instantiationOrder.push(token.id);
         return instance as T;
     }

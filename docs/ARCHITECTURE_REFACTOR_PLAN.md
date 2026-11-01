@@ -1,9 +1,11 @@
 # 主进程依赖结构与能力边界重构
 
 - 日期：2026-11-01
-- 状态：已实施（同日完成，验收标准见 §9）
+- 状态：已实施（同日完成，验收标准见 §9）；**部分决策已被后续变更取代**
 - 范围：`apps/desktop/src/main.ts`、`apps/desktop/src/main/**`、相关测试与架构文档
 - 不包含：renderer 契约协议重设计、窗口级子容器、自动注入、支持非 Electron 宿主
+
+> **⚠️ 后续变更指引（2026-11-01）**：本文档 §2.3「不增加 `ctx.app`」、§5.2「部署控制面由容器工厂构造」以及「公开能力 token」相关决策已被 [`docs/CAPABILITY_KERNEL_REFACTOR_PLAN.md`](./CAPABILITY_KERNEL_REFACTOR_PLAN.md) 取代。当前约定以该文档与 `docs/ARCHITECTURE.md` §2.3 为准：内核能力（Logger/AppEnv/EventPublisher/Deployment）由 DesktopApp 直接持有，经受限 `AppHandle`（`ctx.app`）分发，不存在任何内核能力 token；deployments 管理 RPC 是框架内置路由（`core/deployment/admin-routes.ts`），不再是业务模块。本文档其余成果（api/kernel/spi 边界、容器并发与 dispose 正确性、启动失败回滚、模块 api.ts、Electron 默认装配、`AppModule.dispose`）仍然有效。
 
 ## 1. 背景
 

@@ -26,6 +26,6 @@ export const searchModule: AppModule = {
         // 尚未启动，实现内部会在就绪后自动连接，不阻塞应用启动。
         const search = await ctx.services.get(searchToken);
         search.startListening();
-        ctx.logger.info('search adapter initialized');
+        ctx.app.logger.info('search adapter initialized');
     },
 };

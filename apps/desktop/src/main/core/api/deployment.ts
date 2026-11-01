@@ -4,10 +4,12 @@
  *
  * 同一个控制面对象承载三个逻辑接口，按受众分发（实现见
  * core/deployment/manager.ts，完整类型见 core/deployment/controller.ts）：
- * - DeploymentReadiness：外部服务客户端（createExternalServiceClient）的
- *   查询与就绪面；
- * - DeploymentAdmin：deployments 管理模块的管理面（list/start/stop/restart）；
- * - DeploymentController：框架内部受众（register/startAll/stopAll），刻意
+ * - DeploymentReadiness：外部服务客户端（createExternalServiceClient）与
+ *   业务接触点的查询与就绪面（经 `ctx.app.deployments` 消费）；
+ * - DeploymentAdmin：deployments 管理 RPC（list/start/stop/restart）的
+ *   管理面——它是框架内置路由（core/deployment/admin-routes.ts），类型
+ *   住在 core/deployment/controller.ts，不经本公共面或任何 token 暴露；
+ * - DeploymentController：框架内部受众（register/startAll/stopAll），同样
  *   不在本文件——它不从 core 公共面导出。
  *
  * 状态/快照的线上格式与 `@desktop-frame/contracts` 的 schema 平行定义
@@ -136,8 +138,9 @@ export class DeploymentManagerClosedError extends DeploymentError {}
 
 /**
  * 部署控制面的就绪查询受众：外部服务适配层（createExternalServiceClient）
- * 经 `deploymentReadinessToken` 消费。注册与批量编排（register/startAll/
- * stopAll）与管理面（start/stop/restart）都不在此受众——权限按需分发。
+ * 与业务接触点经 `ctx.app.deployments` 消费。注册与批量编排
+ * （register/startAll/stopAll）与管理面（start/stop/restart）都不在此
+ * 受众——权限按需分发。
  */
 export interface DeploymentReadiness {
     /** 单个部署的状态快照；未知 id 返回 undefined。 */
@@ -146,19 +149,4 @@ export interface DeploymentReadiness {
     whenReady(id: string, timeoutMs?: number): Promise<void>;
     /** 订阅状态迁移；返回取消订阅函数。 */
     onChange(listener: (change: DeploymentChange) => void): () => void;
-}
-
-/**
- * 部署控制面的管理受众：deployments 管理模块经 `deploymentAdminToken`
- * 消费，供 renderer 的控制面面板使用。不含声明接管与批量编排。
- */
-export interface DeploymentAdmin {
-    /** 全部部署的状态快照（按注册顺序）。 */
-    list(): DeploymentStatus[];
-    /** 启动部署并返回快照（managed 等待就绪或失败；external 立即返回 waiting）。 */
-    start(id: string): Promise<DeploymentStatus>;
-    /** 停止部署并返回快照（managed 优雅终止；external 撤销探测）。 */
-    stop(id: string): Promise<DeploymentStatus>;
-    /** 重启部署（停止后重新启动）并返回快照。 */
-    restart(id: string): Promise<DeploymentStatus>;
 }

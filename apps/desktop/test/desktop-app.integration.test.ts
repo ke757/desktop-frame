@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { procedure, type RpcResult } from '@desktop-frame/contracts';
 import { desktopApp } from '../src/main/core/kernel/builder';
+import { UnknownServiceError } from '../src/main/core/kernel/container';
 import type { BeforeQuitEvent, HostRuntime } from '../src/main/core/spi/host';
 import type {
     IpcTransport,
@@ -16,21 +17,21 @@ import type { WindowController, WindowDefinition } from '../src/main/core/spi/wi
 import { MemoryLogger } from '../src/main/core/kernel/logging';
 import {
     defineService,
-    deploymentReadinessToken,
     DeploymentStartFailedError,
     InvalidDeploymentError,
     serviceToken,
+    type AppHandle,
     type AppModule,
     type DeploymentChange,
 } from '../src/main/core';
 import { settingsModule } from '../src/main/modules/settings/settings.module';
-import { deploymentsModule } from '../src/main/modules/deployments/deployments.module';
 import { FakeProcessHost, startHealthServer } from './fakes';
 
 /**
  * DesktopApp 集成测试：经内核 builder 注入 Fake runtime，只通过公开面
  * （run/quit/logger/只读 lifecycle）与 IPC 行为验证——不为测试重新开放
- * 内部控制面。覆盖：build 纯声明校验、run 启动时序、正常退出、部署受众、
+ * 内部控制面。覆盖：build 纯声明校验（含无效部署 spec 在 build 失败）、
+ * run 启动时序、正常退出、ctx.app 受限能力、部署受众与内置管理路由、
  * 模块 init 失败回滚、required 部署失败回滚。
  */
 
@@ -46,6 +47,8 @@ class FakeHost implements HostRuntime {
     readonly isPackaged = true;
     readonly whenReadyPromise: Promise<void>;
     exitCode: number | undefined;
+    /** host.quit() 被调用的次数（受控退出入口的 no-op 验证用）。 */
+    quitCalls = 0;
     secondInstanceArgv: string[] = [];
     private readonly beforeQuitListeners: Array<(event: BeforeQuitEvent) => void> = [];
     private readonly windowAllClosedListeners: Array<() => void> = [];
@@ -79,6 +82,7 @@ class FakeHost implements HostRuntime {
 
     /** 触发 before-quit 链（真实 electron 中 quit() 会先走该事件）。 */
     quit(): void {
+        this.quitCalls += 1;
         if (this.quitRequested) return;
         this.quitRequested = true;
         for (const listener of Array.from(this.beforeQuitListeners)) {
@@ -321,6 +325,21 @@ describe('DesktopApp（build 纯声明装配）', () => {
         expect(windows.opened).toEqual([]);
         expect(transport.listeners.size).toBe(0);
     });
+
+    it('无效 DeploymentSpec 在 build 期失败：字段校验同步抛错且无任何 run 副作用', () => {
+        const badSpecModule: AppModule = {
+            id: 'bad-spec',
+            deployments: [{ id: 'bad-svc', command: 'x', baseUrl: 'not-a-url' }],
+        };
+        const { builder, processHost, windows, transport } = makeHarness('/tmp/u7', [
+            badSpecModule,
+        ]);
+        // spec 登记在 build 期完成，字段合法性同步校验（不需要等到 run）。
+        expect(() => builder.build()).toThrow(InvalidDeploymentError);
+        expect(processHost.spawns).toEqual([]);
+        expect(windows.opened).toEqual([]);
+        expect(transport.listeners.size).toBe(0);
+    });
 });
 
 describe('DesktopApp（run 启动时序与正常退出）', () => {
@@ -425,10 +444,160 @@ describe('DesktopApp（run 启动时序与正常退出）', () => {
         // 关停顺序：模块逆序 dispose（内可解析服务）先于容器服务 dispose。
         expect(order).toEqual(['dispose-resolved-same', 'service-disposed']);
     });
+
+    it('模块 init 经 ctx.app 使用内核能力：env/logger/events/lifecycle/readiness 同源', async () => {
+        const dir = await makeTempDir();
+        const probeModule: AppModule = {
+            id: 'ctx-probe',
+            async init(ctx) {
+                // ctx.app 是受限门面（不是 DesktopApp）：组合根/容器/路由
+                // 等内核内部部件不出现在公共面上。
+                const appKeys = Object.keys(ctx.app).sort();
+                expect(appKeys).toEqual([
+                    'deployments',
+                    'env',
+                    'events',
+                    'lifecycle',
+                    'logger',
+                    'quit',
+                ]);
+                // env：只读环境数据可达。
+                expect(ctx.app.env.appName).toBe('fake-app');
+                // logger：可写日志。
+                ctx.app.logger.info('probe via ctx.app.logger');
+                // events：可发布事件（经窗口宿主扇出可观察）。
+                ctx.app.events.publish(ctxProbeEvent(), { at: 1 });
+                // lifecycle：只读视图，状态与 app.lifecycle 同步。
+                expect(ctx.app.lifecycle.state).toBe('initializing');
+                // deployments：就绪查询受众可达（可订阅/查询）。
+                const off = ctx.app.deployments.onChange(() => {});
+                off();
+                expect(ctx.app.deployments.getStatus('ghost')).toBeUndefined();
+                // 内核能力不在容器注册表：core.* 形状 token 不可解析。
+                await expect(
+                    ctx.services.get(serviceToken('core.env')),
+                ).rejects.toBeInstanceOf(UnknownServiceError);
+            },
+        };
+        const { builder, logger, windows } = makeHarness(dir, [probeModule]);
+        const app = builder.build();
+        const running = app.run();
+        await app.lifecycle.when('ready');
+
+        // init 期间发布的事件经 ctx.app.events 真实到达窗口宿主。
+        expect(windows.sent.some((entry) => entry.channel === 'app.ctxProbe')).toBe(true);
+        expect(
+            logger.entries.some((entry) => entry.message === 'probe via ctx.app.logger'),
+        ).toBe(true);
+        // 模块接触点的 lifecycle 视图与进程壳看到的是同一个状态机。
+        expect(app.lifecycle.state).toBe('ready');
+
+        await app.quit();
+        await running;
+    });
+
+    it('ctx.app 是冻结的委托句柄：模块拿不到 Lifecycle/DeploymentManager 运行时本体', async () => {
+        const dir = await makeTempDir();
+        let seen: AppHandle | undefined;
+        const probeModule: AppModule = {
+            id: 'handle-probe',
+            async init(ctx) {
+                seen = ctx.app;
+            },
+        };
+        const { builder } = makeHarness(dir, [probeModule]);
+        const app = builder.build();
+        const running = app.run();
+        await app.lifecycle.when('ready');
+        expect(seen).toBeDefined();
+
+        const handle = seen as AppHandle;
+        // 句柄本身冻结：能力面不可被模块替换。
+        expect(Object.isFrozen(handle)).toBe(true);
+        // 生命周期运行时窄面：完整 Lifecycle 的迁移/关停方法不在对象上。
+        for (const method of ['transition', 'shutdown', 'onShutdown']) {
+            expect(method in handle.lifecycle).toBe(false);
+        }
+        // 部署运行时窄面：Admin/Controller 方法不在对象上（Readiness 受众）。
+        for (const method of [
+            'start',
+            'stop',
+            'restart',
+            'list',
+            'register',
+            'startAll',
+            'stopAll',
+        ]) {
+            expect(method in handle.deployments).toBe(false);
+        }
+
+        await app.quit();
+        await running;
+    });
+
+    it('ctx.app.env 是冻结快照：修改内核环境数据被拒绝且不影响原值', async () => {
+        const dir = await makeTempDir();
+        let appName = '';
+        const probeModule: AppModule = {
+            id: 'env-freeze-probe',
+            async init(ctx) {
+                appName = ctx.app.env.appName;
+                expect(Object.isFrozen(ctx.app.env)).toBe(true);
+                expect(Object.isFrozen(ctx.app.env.rendererEntry)).toBe(true);
+                expect(Object.isFrozen(ctx.app.env.allowedFrameOrigins)).toBe(true);
+                // ESM 严格模式下对冻结对象赋值抛 TypeError。
+                const mutableEnv = ctx.app.env as unknown as { appName: string };
+                expect(() => {
+                    mutableEnv.appName = 'hijacked';
+                }).toThrow(TypeError);
+            },
+        };
+        const { builder } = makeHarness(dir, [probeModule]);
+        const app = builder.build();
+        const running = app.run();
+        await app.lifecycle.when('ready');
+
+        expect(appName).toBe('fake-app');
+        await app.quit();
+        await running;
+    });
+
+    it('ctx.app.quit 走 DesktopApp 受控入口：关停后重复调用是 no-op', async () => {
+        const dir = await makeTempDir();
+        let quit: (() => void) | undefined;
+        const probeModule: AppModule = {
+            id: 'quit-probe',
+            async init(ctx) {
+                quit = () => ctx.app.quit();
+            },
+        };
+        const { builder, host } = makeHarness(dir, [probeModule]);
+        const app = builder.build();
+        const running = app.run();
+        await app.lifecycle.when('ready');
+
+        (quit as () => void)(); // 受控入口 → before-quit → 关停管线
+        await running;
+        expect(app.lifecycle.state).toBe('exited');
+        expect(host.quitCalls).toBe(1);
+
+        // exited 之后的再次调用不再触达宿主（受控入口的幂等防护）。
+        (quit as () => void)();
+        expect(host.quitCalls).toBe(1);
+    });
 });
 
+/** 测试用事件定义（ctx.app.events 发布通路验证）。 */
+function ctxProbeEvent() {
+    return {
+        kind: 'event' as const,
+        channel: 'app.ctxProbe',
+        payload: z.object({ at: z.number() }),
+    };
+}
+
 describe('DesktopApp（外部部署控制面）', () => {
-    it('部署在模块 init 前拉起（readiness 受众可观察）；关停时服务 dispose 先于部署终止', async () => {
+    it('部署在模块 init 前拉起（ctx.app.deployments 可观察）；关停时服务 dispose 先于部署终止', async () => {
         const dir = await makeTempDir();
         const health = await startHealthServer();
         const order: string[] = [];
@@ -456,7 +625,7 @@ describe('DesktopApp（外部部署控制面）', () => {
             async init(ctx) {
                 await ctx.services.get(demoToken);
                 // 模块只能拿到就绪查询受众：观察状态、订阅迁移。
-                const readiness = await ctx.services.get(deploymentReadinessToken);
+                const readiness = ctx.app.deployments;
                 readiness.onChange((change) => {
                     if (change.status.id !== 'demo-svc') return;
                     changes.push(change);
@@ -468,7 +637,6 @@ describe('DesktopApp（外部部署控制面）', () => {
         };
 
         const { builder, transport, windows, processHost } = makeHarness(dir, [
-            deploymentsModule,
             demoModule,
         ]);
         const app = builder.build();
@@ -476,7 +644,7 @@ describe('DesktopApp（外部部署控制面）', () => {
         await app.lifecycle.when('ready');
         expect(order).toEqual(['init:running']);
 
-        // 控制面管理受众 RPC 可用（deployments.list 走完整路由管线）。
+        // 内置管理路由可用（deployments.list 走完整路由管线，无需业务模块）。
         const result = await transport.call('deployments.list', undefined);
         expect(result).toMatchObject({
             ok: true,
@@ -499,6 +667,52 @@ describe('DesktopApp（外部部署控制面）', () => {
         expect(last?.status.id).toBe('demo-svc');
         expect(last?.to).toBe('stopped');
         await health.close();
+    });
+
+    it('内置管理路由：start/stop/restart 行为与错误翻译保持（未知 id → NOT_FOUND）', async () => {
+        const dir = await makeTempDir();
+        const demoModule: AppModule = {
+            id: 'demo',
+            deployments: [
+                {
+                    id: 'demo-svc',
+                    command: 'demo-server',
+                    baseUrl: 'http://127.0.0.1:1',
+                    health: false,
+                },
+            ],
+        };
+        const { builder, transport } = makeHarness(dir, [demoModule]);
+        const app = builder.build();
+        const running = app.run();
+        await app.lifecycle.when('ready');
+
+        // 未知 id：管理端点翻译为 NOT_FOUND 信封。
+        const unknown = await transport.call('deployments.start', { id: 'ghost' });
+        expect(unknown).toMatchObject({
+            ok: false,
+            error: { code: 'NOT_FOUND' },
+        });
+
+        // start：health:false 的托管部署立即就绪（快照回传 running）。
+        const started = await transport.call('deployments.start', { id: 'demo-svc' });
+        expect(started).toMatchObject({
+            ok: true,
+            data: { id: 'demo-svc', state: 'running', mode: 'managed' },
+        });
+
+        // restart：停止后重新拉起。
+        const restarted = await transport.call('deployments.restart', {
+            id: 'demo-svc',
+        });
+        expect(restarted).toMatchObject({ ok: true, data: { state: 'running' } });
+
+        // stop：优雅终止后落 stopped。
+        const stopped = await transport.call('deployments.stop', { id: 'demo-svc' });
+        expect(stopped).toMatchObject({ ok: true, data: { state: 'stopped' } });
+
+        await app.quit();
+        await running;
     });
 
     it('模块 init 失败触发统一回滚：已 init 模块 dispose、容器回收、run() reject', async () => {
@@ -589,50 +803,6 @@ describe('DesktopApp（外部部署控制面）', () => {
         expect(host.exitCode).toBeUndefined();
     });
 
-    it('控制面工厂失败：先于解析注册的关停管线仍清理已实例化依赖', async () => {
-        const dir = await makeTempDir();
-        /** 可观察 dispose 的进程宿主替身（工厂经容器解析它，dispose 归容器管）。 */
-        class DisposableProcessHost extends FakeProcessHost {
-            disposed = false;
-            dispose(): void {
-                this.disposed = true;
-            }
-        }
-        const processHost = new DisposableProcessHost();
-        // 无效 DeploymentSpec：build 只查重复 id（通过），字段校验在控制面
-        // 工厂内进行——工厂解析 processHost 之后才抛 InvalidDeploymentError。
-        const badSpecModule: AppModule = {
-            id: 'bad-spec',
-            deployments: [{ id: 'bad-svc', command: 'x', baseUrl: 'not-a-url' }],
-        };
-        const host = new FakeHost(dir);
-        const windows = new FakeWindowController();
-        const transport = new FakeTransport();
-        const logger = new MemoryLogger();
-        const app = desktopApp({
-            host,
-            transport,
-            mainDir: dir,
-            createWindows: () => windows,
-            createLogger: () => logger,
-            processHost,
-        })
-            .use(badSpecModule)
-            .window({ id: 'main', isPrimary: true, create: () => undefined })
-            .build();
-
-        await expect(app.run()).rejects.toBeInstanceOf(InvalidDeploymentError);
-
-        // 回滚完整：生命周期落 exited、窗口被关停管线销毁。
-        expect(app.lifecycle.state).toBe('exited');
-        expect(windows.closeAllCalls).toBe(1);
-        // 关键回归：joiner 先于控制面解析注册——工厂已实例化的依赖
-        // （processHost）被 container.dispose 回收，不再泄漏。
-        expect(processHost.disposed).toBe(true);
-        // 失败路径不以正常退出的 host.exit(0) 收尾。
-        expect(host.exitCode).toBeUndefined();
-    });
-
     it('可选部署启动失败不阻断启动：应用照常 ready、IPC 可用', async () => {
         const dir = await makeTempDir();
         let observedState: string | undefined;
@@ -648,8 +818,7 @@ describe('DesktopApp（外部部署控制面）', () => {
                 },
             ],
             async init(ctx) {
-                const readiness = await ctx.services.get(deploymentReadinessToken);
-                observedState = readiness.getStatus('soft-svc')?.state;
+                observedState = ctx.app.deployments.getStatus('soft-svc')?.state;
             },
         };
         const { builder, transport } = makeHarness(dir, [settingsModule, softModule]);

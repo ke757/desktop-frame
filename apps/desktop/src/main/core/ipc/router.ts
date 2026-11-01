@@ -1,30 +1,21 @@
 import type { Procedure, RpcResult } from '@desktop-frame/contracts';
 import { RpcError, err, ok } from '@desktop-frame/contracts';
 import type { z } from 'zod';
-import type { AppEnv } from '../api/env';
-import type { LifecycleView } from '../api/lifecycle';
+import type { AppHandle } from '../api/app-handle';
 import type { ServiceAccessor } from '../api/di';
-import type { EventPublisher } from '../api/event-publisher';
 import type {
     HandlerContext,
     RouteHandler,
     RouteRegistrar,
 } from '../api/route-registrar';
 import type { IpcCallInfo, IpcTransport } from '../spi/ipc-transport';
-import type { Logger } from '../api/logger';
 
 /** 路由构造选项。 */
 export interface RouterOptions {
-    /** 服务获取器（构造 per-call ctx 用）。 */
+    /** 受限应用句柄（来源白名单、生命周期门禁、根 logger、per-call app）。 */
+    readonly app: AppHandle;
+    /** 服务获取器（构造 per-call ctx 用；业务/应用服务的唯一通道）。 */
     readonly services: ServiceAccessor;
-    /** 生命周期视图（调用门禁只读当前状态）。 */
-    readonly lifecycle: LifecycleView;
-    /** 环境信息（frame 来源白名单）。 */
-    readonly env: AppEnv;
-    /** 根 logger。 */
-    readonly logger: Logger;
-    /** 事件发布器（注入 per-call ctx）。 */
-    readonly events: EventPublisher;
 }
 
 /** 一条已注册的路由。 */
@@ -83,7 +74,7 @@ export class IpcRouter implements RouteRegistrar {
     /** 判断 frame 来源是否在白名单内。 */
     private isAllowedFrame(frameUrl: string): boolean {
         if (frameUrl === '') return false;
-        return this.options.env.allowedFrameOrigins.some((origin) =>
+        return this.options.app.env.allowedFrameOrigins.some((origin) =>
             frameUrl.startsWith(origin),
         );
     }
@@ -94,7 +85,8 @@ export class IpcRouter implements RouteRegistrar {
         payload: unknown,
         info: IpcCallInfo,
     ): Promise<RpcResult<unknown>> {
-        const { logger } = this.options;
+        const { app } = this.options;
+        const logger = app.logger;
         try {
             if (!this.isAllowedFrame(info.frameUrl)) {
                 logger.warn('rejected IPC call from untrusted frame', {
@@ -105,10 +97,10 @@ export class IpcRouter implements RouteRegistrar {
             }
 
             // 门禁保证 handler 执行时恒为 ready（HandlerContext 因此无需携带 state）。
-            if (this.options.lifecycle.state !== 'ready') {
+            if (app.lifecycle.state !== 'ready') {
                 return err(
                     'UNAVAILABLE',
-                    `backend is not ready (state: ${this.options.lifecycle.state})`,
+                    `backend is not ready (state: ${app.lifecycle.state})`,
                 );
             }
 
@@ -120,9 +112,9 @@ export class IpcRouter implements RouteRegistrar {
             }
 
             const ctx: HandlerContext = {
-                log: logger.child(route.channel),
+                app,
                 services: this.options.services,
-                events: this.options.events,
+                log: logger.child(route.channel),
                 sender: info,
             };
             const rawOutput = await route.handler(ctx, parsedInput.data as never);

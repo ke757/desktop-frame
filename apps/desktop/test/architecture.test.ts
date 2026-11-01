@@ -10,10 +10,16 @@ import { describe, expect, it } from 'vitest';
  * - core/api    模块作者公共 API（可依赖 spi，不依赖 kernel/ipc/deployment 实现）
  * - core/kernel 内核实现（DesktopApp/Builder/Container/Lifecycle）
  * - core/spi    宿主适配接缝（唯一允许被 electron 适配器实现的 core 面）
- * - core/ipc、core/deployment  框架实现
+ * - core/ipc、core/deployment  框架实现（deployment 含内置管理路由）
  * - electron    适配器 + 默认装配工厂（只依赖 core/api、core/spi）
  * - modules     业务模块（只走 core barrel；跨模块只允许对方 api.ts）
  * - main 根     组合根（index.ts）与窗口声明（windows.ts），唯一全开层
+ *
+ * 能力边界（见 docs/CAPABILITY_KERNEL_REFACTOR_PLAN.md）：
+ * - 内核能力（Logger/AppEnv/EventPublisher/Deployment）由 DesktopApp 持有，
+ *   经受限 AppHandle（ctx.app）分发，不存在任何内核能力 token；
+ * - token 只属于业务与应用服务；deployments 管理 RPC 是框架内置路由，
+ *   DeploymentAdmin 类型住在 core/deployment，不经公共面暴露。
  */
 
 const appRoot = path.resolve(__dirname, '../src/main');
@@ -208,5 +214,102 @@ describe('架构守护：组合根', () => {
             return target === 'index' && rel(from) !== 'index.ts';
         });
         expect(violations.map((v) => `${rel(v.from)} -> ${v.spec}`)).toEqual([]);
+    });
+});
+
+describe('架构守护：能力内核与业务容器边界', () => {
+    /** 已删除的内核能力 token（含内部 token）——不允许任何残留引用。 */
+    const kernelCapabilityTokens = [
+        'envToken',
+        'loggerToken',
+        'eventsToken',
+        'appControlToken',
+        'deploymentReadinessToken',
+        'deploymentAdminToken',
+        'processHostToken',
+        'deploymentControlPlaneToken',
+    ];
+
+    it('全部源码不出现已删除的内核能力 token（标识符级扫描，含深层兼容导入）', () => {
+        const violations: string[] = [];
+        for (const file of sourceFiles) {
+            const content = readFileSync(file, 'utf8');
+            for (const token of kernelCapabilityTokens) {
+                if (new RegExp(`\\b${token}\\b`).test(content)) {
+                    violations.push(`${rel(file)} 引用 ${token}`);
+                }
+            }
+        }
+        expect(violations).toEqual([]);
+    });
+
+    it('core 公共面（api/**）不注册任何 token（serviceToken 调用只属于业务与组合根）', () => {
+        const violations = sourceFiles
+            .filter((file) => rel(file).startsWith('core/api/'))
+            .filter((file) =>
+                // 匹配调用形状（带字符串实参），豁免 di.ts 的词汇定义本身。
+                /\bserviceToken\s*[<(][^)]*['"]/.test(readFileSync(file, 'utf8')),
+            )
+            .map(rel);
+        expect(violations).toEqual([]);
+    });
+
+    it('DeploymentAdmin 不经 core/api 导出（管理受众只在 core/deployment 内部）', () => {
+        const violations = sourceFiles
+            .filter((file) => rel(file).startsWith('core/api/'))
+            .filter((file) =>
+                /export[^;\n]*\bDeploymentAdmin\b/.test(readFileSync(file, 'utf8')),
+            )
+            .map(rel);
+        expect(violations).toEqual([]);
+    });
+
+    it('AppHandle 是唯一的能力分发面：core/api 定义它，接触点类型引用它', () => {
+        const appHandle = readFileSync(
+            path.join(appRoot, 'core/api/app-handle.ts'),
+            'utf8',
+        );
+        expect(appHandle).toContain('export interface AppHandle');
+        // 三类业务接触点（module/route-registrar/di 工厂上下文）都经 ctx.app。
+        for (const file of [
+            'core/api/module.ts',
+            'core/api/route-registrar.ts',
+            'core/api/di.ts',
+        ]) {
+            expect(readFileSync(path.join(appRoot, file), 'utf8')).toMatch(
+                /readonly app: AppHandle/,
+            );
+        }
+    });
+
+    it('能力调用权归 DesktopApp：builder 不签发句柄、不接线依赖句柄的部件', () => {
+        const builder = readFileSync(
+            path.join(appRoot, 'core/kernel/builder.ts'),
+            'utf8',
+        );
+        // Builder 是组合根：只造叶子能力 + 收集声明。以下职责属于 DesktopApp
+        // 构造函数（createHandle → Container/Router → 登记声明）。
+        for (const forbidden of [
+            'new ServiceContainer',
+            'new IpcRouter',
+            'registerDeploymentAdminRoutes',
+            'createHandle',
+            'quit:',
+        ]) {
+            expect(builder).not.toContain(forbidden);
+        }
+        const desktopApp = readFileSync(
+            path.join(appRoot, 'core/kernel/desktop-app.ts'),
+            'utf8',
+        );
+        for (const required of [
+            'private createHandle(): AppHandle',
+            'new ServiceContainer(',
+            'new IpcRouter({ app: this.handle',
+            'registerDeploymentAdminRoutes(this.router',
+            'private requestQuit(): void',
+        ]) {
+            expect(desktopApp).toContain(required);
+        }
     });
 });

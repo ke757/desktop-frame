@@ -1,28 +1,16 @@
-import { defineService } from '../api/di';
 import type { DeploymentProfile } from '../api/deployment';
 import type { AppEnv } from '../api/env';
 import type { HostRuntime } from '../spi/host';
 import type { ProcessHost } from '../spi/process-host';
 import { EventPublisherImpl } from '../ipc/events';
-import { IpcRouter } from '../ipc/router';
 import type { IpcTransport } from '../spi/ipc-transport';
 import { Lifecycle } from './lifecycle';
 import type { Logger } from '../api/logger';
 import { createConsoleLogger } from './logging';
 import type { AppModule } from '../api/module';
-import { ServiceContainer } from './container';
 import { DesktopApp } from './desktop-app';
 import { DeploymentManagerImpl } from '../deployment/manager';
 import { resolveEnv } from './env';
-import { deploymentControlPlaneToken, processHostToken } from './tokens';
-import {
-    appControlToken,
-    deploymentAdminToken,
-    deploymentReadinessToken,
-    envToken,
-    eventsToken,
-    loggerToken,
-} from '../api/tokens';
 import type { WindowController, WindowDefinition } from '../spi/window';
 
 /** desktopApp() 的注入点：全部为接口/工厂，保证 builder 零 electron 依赖。 */
@@ -37,7 +25,7 @@ export interface DesktopAppOptions {
     readonly mainDir: string;
     /** 窗口控制器工厂：由 app 层注入 WindowManager，测试注入 Fake。 */
     readonly createWindows: (context: {
-        readonly env: AppEnv;
+        readonly env: Readonly<AppEnv>;
         readonly logger: Logger;
     }) => WindowController;
     /** 根 logger 工厂（缺省为控制台实现；app 层应传 electron-log 实现）。 */
@@ -53,6 +41,12 @@ export interface DesktopAppOptions {
  * 声明式装配 builder（内核部件；对齐 Tauri `Builder::default().plugin().manage()`）。
  * 生产组合根应使用 electron/app-factory.ts 的 createElectronDesktopApp
  * （本 builder 不从 core 公共面导出，但测试可注入 Fake runtime 直用）。
+ *
+ * 职责分界（能力调用权归 DesktopApp）：本 builder 是组合根——收集声明、
+ * 做声明级冲突校验、调 providers 构造**叶子能力**（logger/env/lifecycle/
+ * windows/events/deployment 控制面），随后移交 DesktopApp。它刻意不组装
+ * AppHandle、不构造 Container/Router、不登记服务/路由/窗口——依赖句柄的
+ * 部件必须由句柄签发者（DesktopApp 构造函数）接线。
  */
 export class DesktopAppBuilder {
     private readonly options: DesktopAppOptions;
@@ -79,34 +73,16 @@ export class DesktopAppBuilder {
      * 构造对象图并返回 DesktopApp 总对象（不启动，对齐 Tauri
      * `build(context)` 的 "does not start the application" 语义）。
      *
-     * build 阶段只做纯声明登记与冲突校验：模块 id / 服务 token / IPC
-     * channel / 窗口 id / 部署 id 的重复声明在此抛错——先于任何启动副作用
-     * （不打开数据库、不启动 sidecar、不安装 transport、不执行模块 init、
-     * 不创建实际窗口）。全仓库唯一的框架接线点：只应在框架演进时改动，
-     * 业务变化走 `.use()` / `.window()` / 模块内部。
+     * build 阶段只做纯声明校验与叶子构造：模块 id / 部署 id 的重复声明、
+     * 部署 spec 字段合法性（登记给控制面时校验）在此同步抛错——先于任何
+     * 启动副作用（不打开数据库、不启动 sidecar、不安装 transport、不执行
+     * 模块 init、不创建实际窗口）。句柄签发、Container/Router 接线与服务/
+     * 路由/窗口登记由 DesktopApp 构造函数完成（build 同步路径内，行为不变）。
      */
     build(): DesktopApp {
         const { host, transport, mainDir } = this.options;
 
-        // ---- 框架接线（固定顺序，依赖为 DAG，靠构造注入 + 接口倒置）----
-        const logger = (this.options.createLogger ?? createConsoleLogger)();
-        const env = resolveEnv(host, mainDir);
-        const lifecycle = new Lifecycle(logger.child('lifecycle'));
-        const container = new ServiceContainer(logger.child('container'));
-        const windows = this.options.createWindows({
-            env,
-            logger: logger.child('windows'),
-        });
-        const events = new EventPublisherImpl(windows, logger.child('events'));
-        const router = new IpcRouter({
-            services: container,
-            lifecycle,
-            env,
-            logger,
-            events,
-        });
-
-        // ---- 纯声明登记与冲突校验（任何启动副作用之前）----
+        // ---- 纯声明冲突校验（最先做，构造对象图之前）----
         const moduleIds = new Set<string>();
         for (const module of this.modules) {
             if (moduleIds.has(module.id)) {
@@ -123,86 +99,40 @@ export class DesktopAppBuilder {
                 deploymentIds.add(spec.id);
             }
         }
-        // 窗口定义（id 重复由窗口控制器抛错）。
-        for (const definition of this.windowDefinitions) {
-            windows.register(definition);
-        }
-        // 服务工厂登记（token 重复由容器抛错；只登记工厂，零实例化）。
-        for (const module of this.modules) {
-            for (const registration of module.services ?? []) {
-                container.register(registration);
-            }
-        }
-        // 路由声明登记（channel 重复由路由抛错）。
-        for (const module of this.modules) {
-            module.registerRoutes?.(router);
-        }
 
-        // ---- 核心服务登记（窄能力 token，见 api/tokens.ts）----
-        container.register(defineService(envToken, () => env));
-        container.register(defineService(loggerToken, () => logger));
-        container.register(defineService(eventsToken, () => events));
-        // 应用控制窄面：只有会进入优雅关停的 quit（完整宿主接口是内部 SPI）。
-        container.register(
-            defineService(appControlToken, () => ({
-                quit: () => {
-                    host.quit();
-                },
-            })),
-        );
-        container.register(
-            defineService(processHostToken, () => this.options.processHost),
-        );
-        // 部署控制面：容器工厂构造（未来可经 accessor 解析其他服务依赖，
-        // 如 Database 类基础设施）；模块申报的部署声明在工厂内注册给控制面，
-        // spec 字段合法性在此时校验（仍先于 startAll 的进程副作用）。
-        const deploymentSpecs = this.modules.flatMap(
-            (module) => module.deployments ?? [],
-        );
-        container.register(
-            defineService(deploymentControlPlaneToken, async (accessor) => {
-                const manager = new DeploymentManagerImpl({
-                    processHost: await accessor.get(processHostToken),
-                    env,
-                    logger: logger.child('deployments'),
-                    profile: this.options.deploymentProfile,
-                });
-                for (const spec of deploymentSpecs) {
-                    manager.register(spec);
-                }
-                return manager;
-            }),
-        );
-        // readiness/admin 公开 token 与内部 controller 指向同一控制面对象
-        // （memoize 保证单实例），按受众分发窄接口，不形成两套状态。
-        container.register(
-            defineService(deploymentReadinessToken, (accessor) =>
-                accessor.get(deploymentControlPlaneToken),
-            ),
-        );
-        container.register(
-            defineService(deploymentAdminToken, (accessor) =>
-                accessor.get(deploymentControlPlaneToken),
-            ),
-        );
-
-        const app = new DesktopApp({
-            host,
+        // ---- 叶子能力构造（固定顺序，依赖为 DAG；所有权移交 DesktopApp）----
+        const logger = (this.options.createLogger ?? createConsoleLogger)();
+        const env = resolveEnv(host, mainDir);
+        const lifecycle = new Lifecycle(logger.child('lifecycle'));
+        const windows = this.options.createWindows({
             env,
+            logger: logger.child('windows'),
+        });
+        const events = new EventPublisherImpl(windows, logger.child('events'));
+        // 部署控制面：spec 在此登记，字段合法性立即校验——build 同步失败，
+        // 任何 run 副作用之前暴露（重复 id 已在上面先行校验）。
+        const deployments = new DeploymentManagerImpl({
+            processHost: this.options.processHost,
+            env,
+            logger: logger.child('deployments'),
+            profile: this.options.deploymentProfile,
+        });
+        for (const spec of this.modules.flatMap((module) => module.deployments ?? [])) {
+            deployments.register(spec);
+        }
+
+        return new DesktopApp({
+            host,
+            transport,
             logger,
+            env,
             lifecycle,
-            container,
-            router,
             windows,
             events,
-            transport,
+            deployments,
             modules: [...this.modules],
-            primaryWindowId: windows.primaryDefinitionId,
+            windowDefinitions: [...this.windowDefinitions],
         });
-        // 注意：app 本身不注册进容器——容器只装 app 的"部件"，组合根不能
-        // 成为自己的服务节点（所有权方向 app → container 单向）。业务需要
-        // "退出应用"等能力时走 appControlToken。
-        return app;
     }
 }
 

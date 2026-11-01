@@ -5,12 +5,7 @@ import {
     type SearchResponse,
 } from '@desktop-frame/contracts';
 import type { EventPublisher, Logger } from '../../core';
-import {
-    defineService,
-    deploymentReadinessToken,
-    eventsToken,
-    loggerToken,
-} from '../../core';
+import { defineService } from '../../core';
 import {
     ExternalServiceError,
     createExternalServiceClient,
@@ -166,15 +161,13 @@ function toRpcError(cause: unknown): RpcError {
 }
 
 /** 搜索服务的注册定义：组装控制面依赖并构造代理客户端。 */
-export const searchService = defineService(searchToken, async (accessor) => {
-    // 客户端只需要就绪查询受众（getStatus/whenReady），不取得部署管理权限。
-    const manager = await accessor.get(deploymentReadinessToken);
-    const logger = await accessor.get(loggerToken);
-    const events = await accessor.get(eventsToken);
+export const searchService = defineService(searchToken, (ctx) => {
+    // 客户端只需要就绪查询受众（ctx.app.deployments 是 DeploymentReadiness，
+    // 不取得部署管理权限）；内核能力经 ctx.app 获取，不经容器解析。
     const client = createExternalServiceClient({
         deployment: SEARCH_DEPLOYMENT_ID,
-        manager,
-        logger: logger.child('search:client'),
+        manager: ctx.app.deployments,
+        logger: ctx.app.logger.child('search:client'),
     });
-    return new SearchServiceImpl(client, logger.child('search'), events);
+    return new SearchServiceImpl(client, ctx.app.logger.child('search'), ctx.app.events);
 });

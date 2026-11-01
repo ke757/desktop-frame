@@ -1,22 +1,25 @@
 /**
  * 模块作者公共 API 的二级 barrel：core/index.ts 只从这里再导出。
  * 本目录不得依赖 kernel/ipc/deployment 实现（守护测试固化）。
+ * 只导出类型化的受限能力与业务 DI 词汇——内核能力没有 token，统一经
+ * AppHandle（ctx.app）分发；token 只属于业务与应用服务。
  */
 export type {
     DisposableService,
     ServiceAccessor,
     ServiceFactory,
+    ServiceFactoryContext,
     ServiceRegistration,
     ServiceToken,
 } from './di';
 export { defineService, serviceToken } from './di';
 export type { LogLevel, LogMeta, Logger } from './logger';
 export type { AppEnv, RendererEntry } from './env';
+export type { AppHandle } from './app-handle';
 export type { AppModule, ModuleDisposeContext, ModuleInitContext } from './module';
 export type { HandlerContext, RouteHandler, RouteRegistrar } from './route-registrar';
 export type { EventPublisher } from './event-publisher';
 export type { LifecycleChange, LifecycleState, LifecycleView } from './lifecycle';
-export type { AppControl } from './app-control';
 export type {
     DeploymentChange,
     DeploymentHealthConfig,
@@ -34,7 +37,6 @@ export {
     DeploymentStartFailedError,
     InvalidDeploymentError,
     UnknownDeploymentError,
-    type DeploymentAdmin,
     type DeploymentReadiness,
 } from './deployment';
 export type {
@@ -43,11 +45,3 @@ export type {
     ExternalServiceClient,
 } from './external-client';
 export { ExternalServiceError, createExternalServiceClient } from './external-client';
-export {
-    appControlToken,
-    deploymentAdminToken,
-    deploymentReadinessToken,
-    envToken,
-    eventsToken,
-    loggerToken,
-} from './tokens';

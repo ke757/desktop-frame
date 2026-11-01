@@ -1,7 +1,6 @@
 import { createElectronDesktopApp } from './electron/app-factory';
 import type { DeploymentProfile } from './core';
 import { createMainWindowDefinition } from './windows';
-import { deploymentsModule } from './modules/deployments/deployments.module';
 import { searchModule } from './modules/search/search.module';
 import { settingsModule } from './modules/settings/settings.module';
 import { systemModule } from './modules/system/system.module';
@@ -34,7 +33,7 @@ export function buildDesktopApp() {
         mainDir: __dirname,
         deploymentProfile: devDeploymentProfile,
     })
-        .use(systemModule, settingsModule, deploymentsModule, searchModule)
+        .use(systemModule, settingsModule, searchModule)
         .window(createMainWindowDefinition())
         .build();
 }

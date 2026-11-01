@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { procedure, RpcError } from '@desktop-frame/contracts';
 import { ServiceContainer } from '../src/main/core/kernel/container';
-import type { AppEnv } from '../src/main/core';
 import { EventPublisherImpl } from '../src/main/core/ipc/events';
 import { IpcRouter } from '../src/main/core/ipc/router';
 import type { IpcListener, IpcTransport } from '../src/main/core/spi/ipc-transport';
 import { Lifecycle } from '../src/main/core/kernel/lifecycle';
 import { MemoryLogger } from '../src/main/core/kernel/logging';
+import { makeAppHandle, makeEnv } from './fakes';
 
 /** 测试用 echo procedure。 */
 const echo = procedure(
@@ -15,24 +15,6 @@ const echo = procedure(
     z.object({ message: z.string() }),
     z.object({ message: z.string() }),
 );
-
-/** 构造测试用环境（可按需覆盖字段）。 */
-function fakeEnv(overrides: Partial<AppEnv> = {}): AppEnv {
-    return {
-        isDev: true,
-        isPackaged: false,
-        devServerUrl: 'http://localhost:5173',
-        appName: 'test',
-        appVersion: '0.0.0',
-        appLocale: 'en-US',
-        userDataPath: '/tmp',
-        mainDir: '/tmp',
-        preloadPath: '/tmp/preload.cjs',
-        rendererEntry: { kind: 'url', url: 'http://localhost:5173' },
-        allowedFrameOrigins: ['http://localhost:5173'],
-        ...overrides,
-    };
-}
 
 /** 记录 listener 的假 transport，可按 channel 模拟调用。 */
 class RecordingTransport implements IpcTransport {
@@ -56,15 +38,16 @@ interface Fixture {
     transport: RecordingTransport;
     lifecycle: Lifecycle;
     container: ServiceContainer;
+    app: ReturnType<typeof makeAppHandle>;
     sink: { sent: Array<{ channel: string; payload: unknown }> };
     logger: MemoryLogger;
 }
 
-/** 组装一套路由及其依赖。 */
+/** 组装一套路由及其依赖（AppHandle 由内存实现组装）。 */
 function createFixture(): Fixture {
     const logger = new MemoryLogger();
-    const lifecycle = new Lifecycle();
-    const container = new ServiceContainer();
+    const lifecycle = new Lifecycle(logger.child('lifecycle'));
+    const container = new ServiceContainer(makeAppHandle());
     const sink = {
         sent: [] as Array<{ channel: string; payload: unknown }>,
         send(channel: string, payload: unknown) {
@@ -72,15 +55,19 @@ function createFixture(): Fixture {
         },
     };
     const events = new EventPublisherImpl(sink, logger);
-    const router = new IpcRouter({
-        services: container,
-        lifecycle,
-        env: fakeEnv(),
+    // 路由直接消费受限应用上下文（来源白名单/门禁/根 logger 都来自它）。
+    const app = makeAppHandle({
         logger,
         events,
+        lifecycle,
+        env: {
+            ...makeEnv(true),
+            allowedFrameOrigins: ['http://localhost:5173'],
+        },
     });
+    const router = new IpcRouter({ app, services: container });
     const transport = new RecordingTransport();
-    return { router, transport, lifecycle, container, sink, logger };
+    return { router, transport, lifecycle, container, app, sink, logger };
 }
 
 describe('IpcRouter', () => {
@@ -187,13 +174,20 @@ describe('IpcRouter', () => {
         if (!result.ok) expect(result.error.code).toBe('INTERNAL');
     });
 
-    it('per-call 上下文已接好容器', async () => {
+    it('per-call 上下文：ctx.app 是组装的 AppHandle，ctx.log 是 channel 子 logger', async () => {
         const fx = createFixture();
         const seen: string[] = [];
         fx.router.handle(echo, async (ctx, input) => {
             seen.push(ctx.sender.frameUrl);
+            // 内核能力经 ctx.app（受限门面），业务服务经 ctx.services。
+            expect(ctx.app).toBe(fx.app);
+            expect(ctx.app.env.allowedFrameOrigins).toContain('http://localhost:5173');
+            expect(ctx.app.lifecycle.state).toBe('ready');
             expect(ctx.services).toBeDefined();
-            expect(ctx.events).toBeDefined();
+            // 直接的内核能力字段已移除：事件发布只能走 ctx.app.events。
+            expect('events' in ctx).toBe(false);
+            // ctx.log 是本 channel 的子 logger（写入带 channel 标签）。
+            ctx.log.info('handler log');
             return { message: input.message };
         });
         fx.router.install(fx.transport);
@@ -201,6 +195,30 @@ describe('IpcRouter', () => {
 
         await fx.transport.call('t.echo', { message: 'hi' });
         expect(seen).toEqual(['http://localhost:5173/']);
+        expect(
+            fx.logger.entries.some(
+                (entry) =>
+                    entry.level === 'info' && entry.message === '[t.echo] handler log',
+            ),
+        ).toBe(true);
+    });
+
+    it('handler 可经 ctx.app.events 发布事件（schema 校验后广播）', async () => {
+        const fx = createFixture();
+        const ping = {
+            kind: 'event' as const,
+            channel: 't.ping',
+            payload: z.object({ at: z.number() }),
+        };
+        fx.router.handle(echo, (ctx, input) => {
+            ctx.app.events.publish(ping, { at: input.message.length });
+            return { message: input.message };
+        });
+        fx.router.install(fx.transport);
+        fx.lifecycle.transition('ready');
+
+        await fx.transport.call('t.echo', { message: 'hi' });
+        expect(fx.sink.sent).toEqual([{ channel: 't.ping', payload: { at: 2 } }]);
     });
 
     it('重复注册同一 channel 抛错', () => {

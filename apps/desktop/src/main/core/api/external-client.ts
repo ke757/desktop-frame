@@ -47,7 +47,7 @@ export interface ExternalServiceClient {
 export interface ExternalClientOptions {
     /** 目标部署 id（须已注册给部署控制面）。 */
     readonly deployment: string;
-    /** 部署控制面的就绪查询受众（客户端只需要 getStatus/whenReady）。 */
+    /** 部署控制面的就绪查询受众（业务经 `ctx.app.deployments` 取得）。 */
     readonly manager: DeploymentReadiness;
     /** 可选 logger（连接失败诊断用）。 */
     readonly logger?: Logger;

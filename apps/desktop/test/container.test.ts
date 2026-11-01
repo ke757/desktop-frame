@@ -6,7 +6,9 @@ import {
     UnknownServiceError,
 } from '../src/main/core/kernel/container';
 import { defineService, serviceToken } from '../src/main/core';
+import type { AppHandle } from '../src/main/core';
 import { MemoryLogger } from '../src/main/core/kernel/logging';
+import { makeAppHandle } from './fakes';
 
 /** 测试用示例服务接口。 */
 interface Repo {
@@ -18,7 +20,7 @@ describe('ServiceContainer', () => {
     it('惰性创建并 memoize 实例', async () => {
         let created = 0;
         const repoToken = serviceToken<Repo>('repo');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(repoToken, () => {
                 created += 1;
@@ -36,11 +38,11 @@ describe('ServiceContainer', () => {
     it('通过 accessor 注入依赖', async () => {
         const repoToken = serviceToken<Repo>('repo');
         const serviceToken2 = serviceToken<{ repo: Repo }>('service');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(defineService(repoToken, () => ({ name: 'repo' })));
         container.register(
-            defineService(serviceToken2, async (accessor) => ({
-                repo: await accessor.get(repoToken),
+            defineService(serviceToken2, async (ctx) => ({
+                repo: await ctx.services.get(repoToken),
             })),
         );
 
@@ -52,15 +54,15 @@ describe('ServiceContainer', () => {
         const order: string[] = [];
         const aToken = serviceToken<{ dispose(): void }>('a');
         const bToken = serviceToken<{ dispose(): void }>('b');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(aToken, () => ({
                 dispose: () => order.push('a'),
             })),
         );
         container.register(
-            defineService(bToken, async (accessor) => {
-                await accessor.get(aToken);
+            defineService(bToken, async (ctx) => {
+                await ctx.services.get(aToken);
                 return { dispose: () => order.push('b') };
             }),
         );
@@ -74,7 +76,7 @@ describe('ServiceContainer', () => {
         const logger = new MemoryLogger();
         const badToken = serviceToken<{ dispose(): void }>('bad');
         const goodToken = serviceToken<{ disposed: boolean }>('good');
-        const container = new ServiceContainer(logger);
+        const container = new ServiceContainer(makeAppHandle(), logger);
         container.register(
             defineService(badToken, () => ({
                 dispose: () => {
@@ -97,7 +99,7 @@ describe('ServiceContainer', () => {
     });
 
     it('未注册的 token 报错且信息可读', async () => {
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         await expect(container.get(serviceToken('nope'))).rejects.toBeInstanceOf(
             UnknownServiceError,
         );
@@ -105,7 +107,7 @@ describe('ServiceContainer', () => {
 
     it('重复注册抛错', () => {
         const token = serviceToken('dup');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(defineService(token, () => ({})));
         expect(() => container.register(defineService(token, () => ({})))).toThrow(
             /already registered/,
@@ -115,12 +117,12 @@ describe('ServiceContainer', () => {
     it('检测循环依赖', async () => {
         const aToken = serviceToken('cyc-a');
         const bToken = serviceToken('cyc-b');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
-            defineService(aToken, async (accessor) => accessor.get(bToken)),
+            defineService(aToken, async (ctx) => ctx.services.get(bToken)),
         );
         container.register(
-            defineService(bToken, async (accessor) => accessor.get(aToken)),
+            defineService(bToken, async (ctx) => ctx.services.get(aToken)),
         );
 
         await expect(container.get(aToken)).rejects.toBeInstanceOf(CyclicDependencyError);
@@ -129,7 +131,7 @@ describe('ServiceContainer', () => {
     it('失败的工厂不被 memoize（可重试）', async () => {
         let attempts = 0;
         const token = serviceToken<number>('flaky');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(token, () => {
                 attempts += 1;
@@ -144,11 +146,48 @@ describe('ServiceContainer', () => {
 
     it('dispose 之后拒绝 get', async () => {
         const token = serviceToken('late');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(defineService(token, () => ({})));
         await container.get(token);
         await container.dispose();
         await expect(container.get(token)).rejects.toThrow(/disposed/);
+    });
+
+    it('工厂上下文：所有工厂拿到同一 AppHandle（内核能力不经容器）', async () => {
+        const seen: AppHandle[] = [];
+        const aToken = serviceToken<{ app: AppHandle }>('ctx-a');
+        const bToken = serviceToken<{ app: AppHandle; a: { app: AppHandle } }>('ctx-b');
+        const app = makeAppHandle();
+        const container = new ServiceContainer(app);
+        container.register(
+            defineService(aToken, (ctx) => {
+                seen.push(ctx.app);
+                return { app: ctx.app };
+            }),
+        );
+        container.register(
+            defineService(bToken, async (ctx) => {
+                // 业务依赖仍经 ctx.services 解析（scoped accessor）。
+                const a = await ctx.services.get(aToken);
+                seen.push(ctx.app);
+                return { app: ctx.app, a };
+            }),
+        );
+
+        const b = await container.get(bToken);
+        // 同一容器实例共享构造注入的同一个 AppHandle。
+        expect(seen[0]).toBe(app);
+        expect(seen[1]).toBe(app);
+        expect(b.a.app).toBe(app);
+    });
+
+    it('内核能力不是容器服务：未注册的 core.* 形状 token 不可解析', async () => {
+        const container = new ServiceContainer(makeAppHandle());
+        // 容器只登记业务/应用服务——任何内核能力形状的 token（这里以
+        // 'core.env' 为代表）都没有注册，经 ctx.services 也不可解析。
+        await expect(container.get(serviceToken('core.env'))).rejects.toBeInstanceOf(
+            UnknownServiceError,
+        );
     });
 });
 
@@ -160,7 +199,7 @@ describe('ServiceContainer（并发解析）', () => {
     it('同 token 冷启动并发：共享同一次创建，不误报循环依赖', async () => {
         let created = 0;
         const token = serviceToken<{ n: number }>('cold');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(token, async () => {
                 created += 1;
@@ -182,7 +221,7 @@ describe('ServiceContainer（并发解析）', () => {
     it('独立服务并发：乱序完成互不干扰', async () => {
         const aToken = serviceToken<string>('ind-a');
         const bToken = serviceToken<string>('ind-b');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(aToken, async () => {
                 await tick(20);
@@ -207,7 +246,7 @@ describe('ServiceContainer（并发解析）', () => {
         const baseToken = serviceToken<{ n: number }>('ovl-base');
         const xToken = serviceToken<{ base: unknown }>('ovl-x');
         const yToken = serviceToken<{ base: unknown }>('ovl-y');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(baseToken, async () => {
                 baseCreated += 1;
@@ -216,13 +255,13 @@ describe('ServiceContainer（并发解析）', () => {
             }),
         );
         container.register(
-            defineService(xToken, async (accessor) => ({
-                base: await accessor.get(baseToken),
+            defineService(xToken, async (ctx) => ({
+                base: await ctx.services.get(baseToken),
             })),
         );
         container.register(
-            defineService(yToken, async (accessor) => ({
-                base: await accessor.get(baseToken),
+            defineService(yToken, async (ctx) => ({
+                base: await ctx.services.get(baseToken),
             })),
         );
 
@@ -235,15 +274,15 @@ describe('ServiceContainer（并发解析）', () => {
         const aToken = serviceToken('cyc-a2');
         const bToken = serviceToken('cyc-b2');
         const cToken = serviceToken('cyc-c2');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
-            defineService(aToken, async (accessor) => accessor.get(bToken)),
+            defineService(aToken, async (ctx) => ctx.services.get(bToken)),
         );
         container.register(
-            defineService(bToken, async (accessor) => accessor.get(cToken)),
+            defineService(bToken, async (ctx) => ctx.services.get(cToken)),
         );
         container.register(
-            defineService(cToken, async (accessor) => accessor.get(aToken)),
+            defineService(cToken, async (ctx) => ctx.services.get(aToken)),
         );
 
         // 深度环路也必须在有限时间内以 CyclicDependencyError 失败。
@@ -261,7 +300,7 @@ describe('ServiceContainer（并发解析）', () => {
         const okToken = serviceToken<string>('mix-ok');
         const aToken = serviceToken('mix-cyc-a');
         const bToken = serviceToken('mix-cyc-b');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(okToken, async () => {
                 await tick(10);
@@ -269,10 +308,10 @@ describe('ServiceContainer（并发解析）', () => {
             }),
         );
         container.register(
-            defineService(aToken, async (accessor) => accessor.get(bToken)),
+            defineService(aToken, async (ctx) => ctx.services.get(bToken)),
         );
         container.register(
-            defineService(bToken, async (accessor) => accessor.get(aToken)),
+            defineService(bToken, async (ctx) => ctx.services.get(aToken)),
         );
 
         const [okResult, cycResult] = await Promise.allSettled([
@@ -289,7 +328,7 @@ describe('ServiceContainer（并发解析）', () => {
     it('并发失败重试：一个消费者失败不影响其他消费者取得实例', async () => {
         let attempts = 0;
         const token = serviceToken<string>('conc-flaky');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(token, async () => {
                 attempts += 1;
@@ -321,7 +360,7 @@ describe('ServiceContainer（dispose 与在途创建）', () => {
         });
         let lateDisposed = false;
         const token = serviceToken<{ dispose(): void }>('late-factory');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(token, async () => {
                 await gate;
@@ -356,7 +395,7 @@ describe('ServiceContainer（dispose 与在途创建）', () => {
         });
         const aToken = serviceToken('pend-a');
         const bToken = serviceToken('pend-b');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(aToken, async () => {
                 await gateA;
@@ -393,7 +432,7 @@ describe('ServiceContainer（dispose 与在途创建）', () => {
         const disposed: string[] = [];
         const badToken = serviceToken('dispose-bad');
         const goodToken = serviceToken('dispose-good');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(badToken, () => {
                 throw new Error('creation fails');
@@ -416,7 +455,7 @@ describe('ServiceContainer（dispose 与在途创建）', () => {
     it('dispose 幂等：重复/并发调用共享同一次清理', async () => {
         let disposeRuns = 0;
         const token = serviceToken('idem');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(
             defineService(token, () => ({
                 dispose: () => {
@@ -434,7 +473,7 @@ describe('ServiceContainer（dispose 与在途创建）', () => {
 
     it('dispose 开始后拒绝新的 register', () => {
         const token = serviceToken('reg-after-dispose');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         void container.dispose();
         expect(() => container.register(defineService(token, () => ({})))).toThrow(
             ContainerDisposedError,
@@ -448,13 +487,13 @@ describe('ServiceContainer（dispose 与在途创建）', () => {
         });
         const aToken = serviceToken('dep-a');
         const bToken = serviceToken('dep-b');
-        const container = new ServiceContainer();
+        const container = new ServiceContainer(makeAppHandle());
         container.register(defineService(bToken, () => ({})));
         container.register(
-            defineService(aToken, async (accessor) => {
+            defineService(aToken, async (ctx) => {
                 await gate;
                 // dispose 已开始：依赖解析被拒绝，a 的创建随之失败。
-                return { b: await accessor.get(bToken) };
+                return { b: await ctx.services.get(bToken) };
             }),
         );
 

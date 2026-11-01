@@ -2,7 +2,8 @@
  * 宿主运行时 SPI：对 Electron `app` 模块的窄接口抽象。DesktopApp 与生命周期
  * 编排只依赖该抽象（不直接依赖 electron），从而可以在单测中用假 host 替换。
  * 这是框架专用的内部接缝：宿主事件订阅与 `exit()` 不向业务模块公开——
- * 业务的应用信息走 AppEnv、应用控制走 AppControl（core/api）。
+ * 业务的应用信息走 `ctx.app.env`、应用控制走 `ctx.app.quit()`（core/api
+ * 的 AppHandle）。
  */
 
 /** before-quit 事件的最小面。 */

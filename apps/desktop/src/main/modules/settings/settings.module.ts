@@ -27,7 +27,7 @@ export const settingsModule: AppModule = {
         // 每次启动自增 launchCount，演示 init 钩子 + 持久化。
         const settings = await ctx.services.get(settingsToken);
         settings.update({ launchCount: settings.get().launchCount + 1 });
-        ctx.logger.info('settings initialized', {
+        ctx.app.logger.info('settings initialized', {
             launchCount: settings.get().launchCount,
         });
     },

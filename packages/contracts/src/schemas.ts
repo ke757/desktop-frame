@@ -94,7 +94,7 @@ export const SettingsChangedEventSchema = z.object({
 });
 
 /**
- * 外部部署的运行状态（与 desktop 端 `core/ports/deployment.ts` 的
+ * 外部部署的运行状态（与 desktop 端 `core/api/deployment.ts` 的
  * `DeploymentState` 平行定义；一致性由 desktop 侧测试守护）。
  */
 export const DeploymentStateSchema = z.enum([

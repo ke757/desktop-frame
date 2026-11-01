@@ -5,8 +5,12 @@ import type { HostRuntime } from '../spi/host';
 /** dev 模式下 web dev server 的默认地址（可用 WEB_DEV_SERVER_URL 覆盖）。 */
 export const DEFAULT_DEV_SERVER_URL = 'http://localhost:5173';
 
-/** 从 HostRuntime 解析环境信息；mainDir 通常传构建产物的 __dirname。 */
-export function resolveEnv(host: HostRuntime, mainDir: string): AppEnv {
+/**
+ * 从 HostRuntime 解析环境信息并返回冻结快照（含嵌套 rendererEntry 与
+ * 来源白名单数组）；mainDir 通常传构建产物的 __dirname。业务经
+ * ctx.app.env 拿到的必须是不可变数据，不能反向修改内核运行配置。
+ */
+export function resolveEnv(host: HostRuntime, mainDir: string): Readonly<AppEnv> {
     const isDev = !host.isPackaged;
     const devServerUrl = isDev
         ? (process.env.WEB_DEV_SERVER_URL ?? DEFAULT_DEV_SERVER_URL)
@@ -28,7 +32,7 @@ export function resolveEnv(host: HostRuntime, mainDir: string): AppEnv {
         ? [new URL(devServerUrl).origin]
         : ['file://'];
 
-    return {
+    return Object.freeze({
         isDev,
         isPackaged: host.isPackaged,
         devServerUrl,
@@ -38,7 +42,7 @@ export function resolveEnv(host: HostRuntime, mainDir: string): AppEnv {
         userDataPath: host.getPath('userData'),
         mainDir,
         preloadPath: path.join(mainDir, 'preload.cjs'),
-        rendererEntry,
-        allowedFrameOrigins,
-    };
+        rendererEntry: Object.freeze(rendererEntry),
+        allowedFrameOrigins: Object.freeze(allowedFrameOrigins),
+    });
 }
